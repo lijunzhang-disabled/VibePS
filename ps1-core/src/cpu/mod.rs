@@ -863,6 +863,33 @@ mod tests {
     }
 
     #[test]
+    fn software_interrupt_uses_status_mask_and_cause_pending_bits() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(None);
+        cpu.set_pc(0x8000_0000);
+        write_program(
+            &mut bus,
+            0x0000_0000,
+            &[
+                i(0x09, 0, 1, 0x0101),     // addiu r1,r0,IE|IM0
+                cop(0x10, 0x04, 1, 12, 0), // mtc0 r1,SR
+                i(0x09, 0, 2, 0x0100),     // addiu r2,r0,software interrupt 0
+                cop(0x10, 0x04, 2, 13, 0), // mtc0 r2,Cause
+                0x0000_0000,               // interrupted before this executes
+            ],
+        );
+
+        for _ in 0..5 {
+            cpu.step(&mut bus);
+        }
+
+        assert_eq!(cpu.pc, 0x8000_0080);
+        assert_eq!(cpu.cop0.epc(), 0x8000_0010);
+        assert_eq!((cpu.cop0.cause() >> 2) & 0x1f, 0);
+        assert_ne!(cpu.cop0.cause() & 0x0100, 0);
+    }
+
+    #[test]
     fn misaligned_instruction_fetch_sets_bad_vaddr() {
         let mut cpu = Cpu::new();
         let mut bus = Bus::new(None);

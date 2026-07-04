@@ -10,6 +10,7 @@ The first emulator target is instruction correctness:
 - Branch and jump delay slots
 - One-instruction load delay
 - COP0 status/cause/EPC behavior
+- COP0 interrupt delivery from `SR.IM & Cause.IP`
 - GTE register transfers before full GTE math
 - `SR.IsC` isolated-cache behavior for BIOS cache flush loops
 

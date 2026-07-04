@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 
 pub const STATUS_IE: u32 = 1 << 0;
-pub const STATUS_IM2: u32 = 1 << 10;
 pub const STATUS_ISC: u32 = 1 << 16;
 pub const STATUS_BEV: u32 = 1 << 22;
 pub const CAUSE_IP2: u32 = 1 << 10;
@@ -9,6 +8,7 @@ pub const CAUSE_BT: u32 = 1 << 30;
 pub const CAUSE_BD: u32 = 1 << 31;
 const CAUSE_EXCODE_MASK: u32 = 0x7c;
 const CAUSE_CE_MASK: u32 = 0x3000_0000;
+const INTERRUPT_MASK: u32 = 0xff00;
 const CAUSE_SOFTWARE_INTERRUPT_MASK: u32 = 0x0300;
 const CAUSE_BT_MASK: u32 = CAUSE_BT;
 
@@ -105,9 +105,7 @@ impl Cop0 {
     }
 
     pub fn interrupts_enabled(&self) -> bool {
-        (self.regs[12] & STATUS_IE) != 0
-            && (self.regs[12] & STATUS_IM2) != 0
-            && (self.regs[13] & CAUSE_IP2) != 0
+        (self.regs[12] & STATUS_IE) != 0 && (self.regs[12] & self.regs[13] & INTERRUPT_MASK) != 0
     }
 
     pub fn cache_isolated(&self) -> bool {

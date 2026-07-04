@@ -1,0 +1,4 @@
+[workspace]
+members = ["ps1-core", "ps1-frontend"]
+resolver = "2"
+

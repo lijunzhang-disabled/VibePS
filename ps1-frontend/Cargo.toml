@@ -1,0 +1,8 @@
+[package]
+name = "ps1-frontend"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ps1-core = { path = "../ps1-core" }
+

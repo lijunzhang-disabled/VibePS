@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 pub const STATUS_IE: u32 = 1 << 0;
 pub const STATUS_IM2: u32 = 1 << 10;
+pub const STATUS_ISC: u32 = 1 << 16;
 pub const STATUS_BEV: u32 = 1 << 22;
 pub const CAUSE_IP2: u32 = 1 << 10;
 pub const CAUSE_BT: u32 = 1 << 30;
@@ -107,6 +108,10 @@ impl Cop0 {
         (self.regs[12] & STATUS_IE) != 0
             && (self.regs[12] & STATUS_IM2) != 0
             && (self.regs[13] & CAUSE_IP2) != 0
+    }
+
+    pub fn cache_isolated(&self) -> bool {
+        (self.regs[12] & STATUS_ISC) != 0
     }
 
     pub(super) fn enter_exception(&mut self, context: ExceptionContext) -> u32 {

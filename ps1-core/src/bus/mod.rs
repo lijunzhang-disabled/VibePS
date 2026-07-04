@@ -13,12 +13,22 @@ pub enum CopyToRamError {
     OutOfRange,
 }
 
+const CACHE_CONTROL_ADDR: u32 = 0xfffe_0130;
+const DEFAULT_CACHE_CONTROL: u32 = 0x0001_e988;
+const ICACHE_WORDS: usize = 1024;
+const ICACHE_LINES: usize = 256;
+const BCC_TAG: u32 = 1 << 2;
+const BCC_IS1: u32 = 1 << 11;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bus {
     ram: Vec<u8>,
     scratchpad: Vec<u8>,
     bios: Vec<u8>,
     io: Vec<u8>,
+    cache_control: u32,
+    icache_words: Vec<u32>,
+    icache_tags: Vec<u32>,
     pub irq: InterruptController,
     pub dma: DmaController,
     pub timers: Timers,
@@ -42,6 +52,9 @@ impl Bus {
             scratchpad: vec![0; SCRATCHPAD_SIZE],
             bios: bios_rom,
             io: vec![0; 0x2000],
+            cache_control: DEFAULT_CACHE_CONTROL,
+            icache_words: vec![0; ICACHE_WORDS],
+            icache_tags: vec![0; ICACHE_LINES],
             irq: InterruptController::new(),
             dma: DmaController::new(),
             timers: Timers::new(),
@@ -85,6 +98,9 @@ impl Bus {
             0x1f80_1000..=0x1f80_1fff => self.read_io8(phys),
             0x1f80_2000..=0x1f80_3fff => 0xff,
             0x1fc0_0000..=0x1fc7_ffff => self.bios[(phys as usize - 0x1fc0_0000) & (BIOS_SIZE - 1)],
+            CACHE_CONTROL_ADDR..=0xfffe_0133 => {
+                ((self.cache_control >> ((phys - CACHE_CONTROL_ADDR) * 8)) & 0xff) as u8
+            }
             _ => self.open_bus as u8,
         };
         self.open_bus = (self.open_bus & 0xffff_ff00) | value as u32;
@@ -106,7 +122,9 @@ impl Bus {
 
     pub fn read32(&mut self, addr: u32) -> u32 {
         let phys = Self::physical_addr(addr);
-        let value = if (0x1f80_1000..=0x1f80_1fff).contains(&phys) {
+        let value = if phys == CACHE_CONTROL_ADDR {
+            self.cache_control
+        } else if (0x1f80_1000..=0x1f80_1fff).contains(&phys) {
             self.read_io32(phys)
         } else {
             let b0 = self.read8(addr) as u32;
@@ -138,6 +156,11 @@ impl Bus {
                 self.scratchpad[index] = value;
             }
             0x1f80_1000..=0x1f80_1fff => self.write_io8(phys, value),
+            CACHE_CONTROL_ADDR..=0xfffe_0133 => {
+                let shift = (phys - CACHE_CONTROL_ADDR) * 8;
+                self.cache_control =
+                    (self.cache_control & !(0xff << shift)) | ((value as u32) << shift);
+            }
             _ => {}
         }
         self.open_bus = (self.open_bus & 0xffff_ff00) | value as u32;
@@ -145,7 +168,10 @@ impl Bus {
 
     pub fn write16(&mut self, addr: u32, value: u16) {
         let phys = Self::physical_addr(addr);
-        if (0x1f80_1000..=0x1f80_1fff).contains(&phys) {
+        if (CACHE_CONTROL_ADDR..=0xfffe_0132).contains(&phys) {
+            self.write8(addr, value as u8);
+            self.write8(addr.wrapping_add(1), (value >> 8) as u8);
+        } else if (0x1f80_1000..=0x1f80_1fff).contains(&phys) {
             self.write_io16(phys, value);
         } else {
             self.write8(addr, value as u8);
@@ -156,7 +182,9 @@ impl Bus {
 
     pub fn write32(&mut self, addr: u32, value: u32) {
         let phys = Self::physical_addr(addr);
-        if (0x1f80_1000..=0x1f80_1fff).contains(&phys) {
+        if phys == CACHE_CONTROL_ADDR {
+            self.cache_control = value;
+        } else if (0x1f80_1000..=0x1f80_1fff).contains(&phys) {
             self.write_io32(phys, value);
         } else {
             self.write8(addr, value as u8);
@@ -174,6 +202,74 @@ impl Bus {
         }
     }
 
+    pub fn cache_control(&self) -> u32 {
+        self.cache_control
+    }
+
+    pub fn isolated_cache_read8(&self, addr: u32) -> u8 {
+        ((self.isolated_cache_read32(addr & !3) >> ((addr & 3) * 8)) & 0xff) as u8
+    }
+
+    pub fn isolated_cache_read16(&self, addr: u32) -> u16 {
+        let lo = self.isolated_cache_read8(addr) as u16;
+        let hi = self.isolated_cache_read8(addr.wrapping_add(1)) as u16;
+        lo | (hi << 8)
+    }
+
+    pub fn isolated_cache_read32(&self, addr: u32) -> u32 {
+        if (self.cache_control & BCC_IS1) == 0 {
+            return 0;
+        }
+
+        let word_index = icache_word_index(addr);
+        if (self.cache_control & BCC_TAG) != 0 {
+            let tag = self.icache_tags[icache_line_index(addr)];
+            let match_bit = if (tag & 0xffff_f000) == (addr & 0xffff_f000) {
+                0x10
+            } else {
+                0
+            };
+            (self.icache_words[word_index] & !0x1f) | (tag & 0x0f) | match_bit
+        } else {
+            self.icache_words[word_index]
+        }
+    }
+
+    pub fn isolated_cache_write8(&mut self, addr: u32, value: u8) {
+        if (self.cache_control & BCC_TAG) != 0 {
+            self.isolated_cache_write32(addr, value as u32);
+            return;
+        }
+
+        let aligned = addr & !3;
+        let shift = (addr & 3) * 8;
+        let word =
+            (self.isolated_cache_read32(aligned) & !(0xff << shift)) | ((value as u32) << shift);
+        self.isolated_cache_write32(aligned, word);
+    }
+
+    pub fn isolated_cache_write16(&mut self, addr: u32, value: u16) {
+        if (self.cache_control & BCC_TAG) != 0 {
+            self.isolated_cache_write32(addr, value as u32);
+            return;
+        }
+
+        self.isolated_cache_write8(addr, value as u8);
+        self.isolated_cache_write8(addr.wrapping_add(1), (value >> 8) as u8);
+    }
+
+    pub fn isolated_cache_write32(&mut self, addr: u32, value: u32) {
+        if (self.cache_control & BCC_IS1) == 0 {
+            return;
+        }
+
+        if (self.cache_control & BCC_TAG) != 0 {
+            self.icache_tags[icache_line_index(addr)] = (value & 0x0f) | (addr & 0xffff_f000);
+        } else {
+            self.icache_words[icache_word_index(addr)] = value;
+        }
+    }
+
     fn peek8(&self, addr: u32) -> u8 {
         let phys = Self::physical_addr(addr);
         match phys {
@@ -183,6 +279,9 @@ impl Bus {
             }
             0x1f80_1000..=0x1f80_1fff => self.io[(phys as usize - 0x1f80_1000) & 0x1fff],
             0x1fc0_0000..=0x1fc7_ffff => self.bios[(phys as usize - 0x1fc0_0000) & (BIOS_SIZE - 1)],
+            CACHE_CONTROL_ADDR..=0xfffe_0133 => {
+                ((self.cache_control >> ((phys - CACHE_CONTROL_ADDR) * 8)) & 0xff) as u8
+            }
             _ => ((self.open_bus >> ((addr & 3) * 8)) & 0xff) as u8,
         }
     }
@@ -421,9 +520,17 @@ fn dma_word_count(bcr: u32, sync_mode: u32) -> u32 {
     }
 }
 
+fn icache_word_index(addr: u32) -> usize {
+    ((addr as usize) & 0x0fff) >> 2
+}
+
+fn icache_line_index(addr: u32) -> usize {
+    ((addr as usize) & 0x0fff) >> 4
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Bus;
+    use super::{Bus, BCC_IS1, BCC_TAG, DEFAULT_CACHE_CONTROL};
 
     #[test]
     fn maps_ram_through_kseg0_and_kseg1() {
@@ -458,5 +565,32 @@ mod tests {
 
         assert_eq!(bus.peek32(0x8000_0100), 0x1234_5678);
         assert_eq!(bus.open_bus, open_bus);
+    }
+
+    #[test]
+    fn cache_control_register_round_trips() {
+        let mut bus = Bus::new(None);
+
+        assert_eq!(bus.read32(0xfffe_0130), DEFAULT_CACHE_CONTROL);
+        bus.write32(0xfffe_0130, 0x0000_0804);
+        assert_eq!(bus.cache_control(), 0x0000_0804);
+        assert_eq!(bus.read32(0xfffe_0130), 0x0000_0804);
+    }
+
+    #[test]
+    fn isolated_cache_tag_and_code_modes_do_not_touch_ram() {
+        let mut bus = Bus::new(None);
+
+        bus.write32(0xfffe_0130, BCC_IS1 | BCC_TAG);
+        bus.isolated_cache_write32(0x0000_0000, 0);
+        assert_eq!(bus.isolated_cache_read32(0x0000_0000) & 0x1f, 0x10);
+        bus.isolated_cache_write32(0x0000_0004, 0x0f);
+        assert_eq!(bus.isolated_cache_read32(0x0000_0000) & 0x1f, 0x1f);
+
+        bus.write32(0xfffe_0130, BCC_IS1);
+        bus.isolated_cache_write32(0x0000_0004, 0x1234_5678);
+
+        assert_eq!(bus.isolated_cache_read32(0x0000_0004), 0x1234_5678);
+        assert_eq!(bus.read32(0x0000_0004), 0);
     }
 }

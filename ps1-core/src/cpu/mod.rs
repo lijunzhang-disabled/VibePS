@@ -347,7 +347,7 @@ impl Cpu {
     }
 
     fn load8(&mut self, opcode: u32, bus: &mut Bus, signed: bool) {
-        let value = bus.read8(ea(self, opcode));
+        let value = self.data_read8(bus, ea(self, opcode));
         let extended = if signed {
             value as i8 as i32 as u32
         } else {
@@ -362,7 +362,7 @@ impl Cpu {
             self.raise_exception(Exception::AddressLoad, pc, Some(addr), None);
             return;
         }
-        let value = bus.read16(addr);
+        let value = self.data_read16(bus, addr);
         let extended = if signed {
             value as i16 as i32 as u32
         } else {
@@ -377,14 +377,14 @@ impl Cpu {
             self.raise_exception(Exception::AddressLoad, pc, Some(addr), None);
             return;
         }
-        let value = bus.read32(addr);
+        let value = self.data_read32(bus, addr);
         self.set_load(rt(opcode), value);
     }
 
     fn lwl(&mut self, opcode: u32, bus: &mut Bus) {
         let addr = ea(self, opcode);
         let aligned = addr & !3;
-        let word = bus.read32(aligned);
+        let word = self.data_read32(bus, aligned);
         let old = self.load_merge_base(rt(opcode));
         let value = match addr & 3 {
             0 => (old & 0x00ff_ffff) | (word << 24),
@@ -398,7 +398,7 @@ impl Cpu {
     fn lwr(&mut self, opcode: u32, bus: &mut Bus) {
         let addr = ea(self, opcode);
         let aligned = addr & !3;
-        let word = bus.read32(aligned);
+        let word = self.data_read32(bus, aligned);
         let old = self.load_merge_base(rt(opcode));
         let value = match addr & 3 {
             0 => word,
@@ -410,7 +410,7 @@ impl Cpu {
     }
 
     fn store8(&mut self, opcode: u32, bus: &mut Bus) {
-        bus.write8(ea(self, opcode), self.reg(rt(opcode)) as u8);
+        self.data_write8(bus, ea(self, opcode), self.reg(rt(opcode)) as u8);
     }
 
     fn store16(&mut self, opcode: u32, bus: &mut Bus, pc: u32) {
@@ -419,7 +419,7 @@ impl Cpu {
             self.raise_exception(Exception::AddressStore, pc, Some(addr), None);
             return;
         }
-        bus.write16(addr, self.reg(rt(opcode)) as u16);
+        self.data_write16(bus, addr, self.reg(rt(opcode)) as u16);
     }
 
     fn store32(&mut self, opcode: u32, bus: &mut Bus, pc: u32) {
@@ -428,24 +428,24 @@ impl Cpu {
             self.raise_exception(Exception::AddressStore, pc, Some(addr), None);
             return;
         }
-        bus.write32(addr, self.reg(rt(opcode)));
+        self.data_write32(bus, addr, self.reg(rt(opcode)));
     }
 
     fn swl(&mut self, opcode: u32, bus: &mut Bus) {
         let addr = ea(self, opcode);
         let value = self.reg(rt(opcode));
         match addr & 3 {
-            0 => bus.write8(addr, (value >> 24) as u8),
+            0 => self.data_write8(bus, addr, (value >> 24) as u8),
             1 => {
-                bus.write8(addr - 1, (value >> 16) as u8);
-                bus.write8(addr, (value >> 24) as u8);
+                self.data_write8(bus, addr - 1, (value >> 16) as u8);
+                self.data_write8(bus, addr, (value >> 24) as u8);
             }
             2 => {
-                bus.write8(addr - 2, (value >> 8) as u8);
-                bus.write8(addr - 1, (value >> 16) as u8);
-                bus.write8(addr, (value >> 24) as u8);
+                self.data_write8(bus, addr - 2, (value >> 8) as u8);
+                self.data_write8(bus, addr - 1, (value >> 16) as u8);
+                self.data_write8(bus, addr, (value >> 24) as u8);
             }
-            _ => bus.write32(addr & !3, value),
+            _ => self.data_write32(bus, addr & !3, value),
         }
     }
 
@@ -453,17 +453,17 @@ impl Cpu {
         let addr = ea(self, opcode);
         let value = self.reg(rt(opcode));
         match addr & 3 {
-            0 => bus.write32(addr, value),
+            0 => self.data_write32(bus, addr, value),
             1 => {
-                bus.write8(addr, value as u8);
-                bus.write8(addr + 1, (value >> 8) as u8);
-                bus.write8(addr + 2, (value >> 16) as u8);
+                self.data_write8(bus, addr, value as u8);
+                self.data_write8(bus, addr + 1, (value >> 8) as u8);
+                self.data_write8(bus, addr + 2, (value >> 16) as u8);
             }
             2 => {
-                bus.write8(addr, value as u8);
-                bus.write8(addr + 1, (value >> 8) as u8);
+                self.data_write8(bus, addr, value as u8);
+                self.data_write8(bus, addr + 1, (value >> 8) as u8);
             }
-            _ => bus.write8(addr, value as u8),
+            _ => self.data_write8(bus, addr, value as u8),
         }
     }
 
@@ -473,7 +473,7 @@ impl Cpu {
             self.raise_exception(Exception::AddressLoad, pc, Some(addr), None);
             return;
         }
-        let value = bus.read32(addr);
+        let value = self.data_read32(bus, addr);
         self.gte.write_data(rt(opcode), value);
     }
 
@@ -484,7 +484,55 @@ impl Cpu {
             return;
         }
         let value = self.gte.read_data(rt(opcode));
-        bus.write32(addr, value);
+        self.data_write32(bus, addr, value);
+    }
+
+    fn data_read8(&self, bus: &mut Bus, addr: u32) -> u8 {
+        if self.cop0.cache_isolated() {
+            bus.isolated_cache_read8(addr)
+        } else {
+            bus.read8(addr)
+        }
+    }
+
+    fn data_read16(&self, bus: &mut Bus, addr: u32) -> u16 {
+        if self.cop0.cache_isolated() {
+            bus.isolated_cache_read16(addr)
+        } else {
+            bus.read16(addr)
+        }
+    }
+
+    fn data_read32(&self, bus: &mut Bus, addr: u32) -> u32 {
+        if self.cop0.cache_isolated() {
+            bus.isolated_cache_read32(addr)
+        } else {
+            bus.read32(addr)
+        }
+    }
+
+    fn data_write8(&self, bus: &mut Bus, addr: u32, value: u8) {
+        if self.cop0.cache_isolated() {
+            bus.isolated_cache_write8(addr, value);
+        } else {
+            bus.write8(addr, value);
+        }
+    }
+
+    fn data_write16(&self, bus: &mut Bus, addr: u32, value: u16) {
+        if self.cop0.cache_isolated() {
+            bus.isolated_cache_write16(addr, value);
+        } else {
+            bus.write16(addr, value);
+        }
+    }
+
+    fn data_write32(&self, bus: &mut Bus, addr: u32, value: u32) {
+        if self.cop0.cache_isolated() {
+            bus.isolated_cache_write32(addr, value);
+        } else {
+            bus.write32(addr, value);
+        }
     }
 
     fn reg(&self, index: usize) -> u32 {
@@ -858,5 +906,33 @@ mod tests {
         assert_eq!(bus.read8(0x103), 0x22);
         assert_eq!(bus.read8(0x104), 0x11);
         assert_eq!(cpu.regs[3], 0x1122_3344);
+    }
+
+    #[test]
+    fn isolated_cache_mode_redirects_data_stores_away_from_ram() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(None);
+        cpu.set_pc(0x8000_0000);
+        write_program(
+            &mut bus,
+            0x0000_0000,
+            &[
+                i(0x0f, 0, 1, 0x0001),     // lui r1,0x0001 ; COP0 SR.IsC
+                cop(0x10, 0x04, 1, 12, 0), // mtc0 r1,SR
+                i(0x09, 0, 2, 0x1234),     // addiu r2,r0,0x1234
+                i(0x2b, 0, 2, 0x100),      // sw r2,0x100(r0) ; isolated
+                cop(0x10, 0x04, 0, 12, 0), // mtc0 r0,SR
+                i(0x23, 0, 3, 0x100),      // lw r3,0x100(r0) ; normal RAM
+                0x0000_0000,               // nop; wait for load delay
+            ],
+        );
+
+        for _ in 0..7 {
+            cpu.step(&mut bus);
+        }
+
+        assert_eq!(bus.read32(0x0000_0100), 0);
+        assert_eq!(bus.isolated_cache_read32(0x0000_0100), 0x0000_1234);
+        assert_eq!(cpu.regs[3], 0);
     }
 }

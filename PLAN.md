@@ -6,7 +6,7 @@
 |---|---|---|
 | Phase 0: Research + skeleton | Done | Workspace, architecture docs, core crate, CLI harness |
 | Phase 1: CPU + memory bus | In progress | R3000A core, COP0, load/branch delays, memory map, tests |
-| Phase 2: BIOS boot | Started | BIOS boot trace CLI, then i-cache/write queue/exception refinements |
+| Phase 2: BIOS boot | Started | BIOS boot trace CLI, BCC/cache isolation, then i-cache/write queue refinements |
 | Phase 3: DMA + timers + IRQs | Started | Real DMA timing, root-counter sync, interrupt edge behavior |
 | Phase 4: GPU | Pending | GP0/GP1 parser, VRAM transfers, polygons, rectangles, display output |
 | Phase 5: CD-ROM | Pending | Command/status machine, sector reads, ISO/BIN/CUE, XA timing |
@@ -42,6 +42,7 @@
 2. Boot from `0xBFC00000`.
 3. Record a boot trace with `ps1-frontend --trace` and compare against known-good emulator traces.
 4. Implement i-cache and scratchpad/cache-control behavior only when tests or BIOS traces need it.
+   Current coverage includes the BIU/cache-control register and isolated cache data accesses used by BIOS flush loops.
 5. Keep direct PS-X EXE loading for CPU and demo bring-up.
 
 ## Phase 3 Details: DMA + Timers + IRQs

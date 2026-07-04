@@ -9,6 +9,8 @@ This repository currently contains the first implementation slice:
 - Rust workspace with `ps1-core` and `ps1-frontend`
 - MIPS R3000A CPU foundation with branch/load delay behavior
 - PS1 virtual-to-physical memory map, RAM, scratchpad, BIOS ROM, and MMIO
+- BIU/cache-control register and isolated-cache data access behavior for BIOS
+  cache flush bring-up
 - Interrupt controller, root-counter timers, DMA register model, and GPU/SPU/CD
   scaffolding
 - Minimal PS-X EXE loader and CLI runner with BIOS boot trace output

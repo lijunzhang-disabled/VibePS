@@ -32,3 +32,27 @@ These exposed and fixed real issues in the interpreter:
 - Delayed loads were always committed after the following instruction, even when that instruction wrote the same target register.
 - Consecutive loads to the same register committed the first load too early instead of keeping it invisible.
 - Relative branches executed in a branch delay slot used the original branch PC as their base instead of the current PC observed by the R3000A pipeline.
+
+## CPU/BIOS Native Test Closure
+
+Additional local coverage now exercises the CPU/BIOS paths that do not require
+a MIPS cross-toolchain or copyrighted BIOS image:
+
+- COP0 `RFE` status-stack restore semantics, matching the PCSX-Redux interpreter formula.
+- Exception vector selection for both boot ROM `BEV=1` and RAM `BEV=0` vectors.
+- Address-store exceptions from misaligned `SW`, including `BadVaddr`, `EPC`, `BD`, and exception code state.
+- Synthetic BIOS execution from `0xbfc00000`.
+- CPU reset back to the BIOS boot vector.
+- PS-X EXE loading of payload, PC, GP, and SP state.
+- PS-X EXE rejection paths for invalid headers, truncated payloads, and payloads crossing the RAM end.
+
+## Remaining External Blockers
+
+- The original PCSX-Redux `cpu.ps-exe` and `cop0.ps-exe` programs still need
+  `mipsel-none-elf-gcc` / `mipsel-none-elf-g++` or equivalent prebuilt
+  artifacts before they can be run end-to-end.
+- Most remaining PCSX-Redux COP0 cases cover debug breakpoint/watchpoint
+  behavior through `BPC`, `BDA`, `BDAM`, and `DCIC`. Those should be ported
+  after the emulator implements PS1 COP0 debug hardware.
+- Real BIOS trace comparison still requires a user-provided BIOS image and a
+  known-good reference trace, because the BIOS is not redistributable.

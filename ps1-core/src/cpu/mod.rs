@@ -656,7 +656,7 @@ fn add_overflow(a: u32, b: u32, result: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        cop0::{CAUSE_BD, CAUSE_BT},
+        cop0::{CAUSE_BD, CAUSE_BT, STATUS_BEV},
         Cpu,
     };
     use crate::bus::Bus;
@@ -1126,6 +1126,65 @@ mod tests {
 
         assert_eq!(cpu.pc, 0xbfc0_0180);
         assert_eq!(cpu.cop0.epc(), 0x8000_0000);
+    }
+
+    #[test]
+    fn exception_vector_uses_ram_vector_when_bev_is_clear() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(None);
+        cpu.set_pc(0x8000_0000);
+        cpu.cop0.write(12, 0);
+        write_program(&mut bus, 0x0000_0000, &[0x0000_000c]);
+
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.pc, 0x8000_0080);
+        assert_eq!(cpu.cop0.epc(), 0x8000_0000);
+        assert_eq!((cpu.cop0.cause() >> 2) & 0x1f, 8);
+    }
+
+    #[test]
+    fn rfe_restores_current_mode_bits_from_status_stack() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(None);
+        cpu.set_pc(0x8000_0000);
+        cpu.cop0.write(12, STATUS_BEV | 0x2c);
+        write_program(
+            &mut bus,
+            0x0000_0000,
+            &[
+                cop(0x10, 0x10, 0, 0, 0x10), // rfe
+            ],
+        );
+
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.pc, 0x8000_0004);
+        assert_eq!(cpu.cop0.status(), STATUS_BEV | 0x2b);
+    }
+
+    #[test]
+    fn misaligned_store_sets_bad_vaddr_and_address_store_code() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(None);
+        cpu.set_pc(0x8000_0000);
+        cpu.regs[1] = 0x1234_5678;
+        write_program(
+            &mut bus,
+            0x0000_0000,
+            &[
+                i(0x2b, 0, 1, 1), // sw r1,1(r0)
+            ],
+        );
+
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.pc, 0xbfc0_0180);
+        assert_eq!(cpu.cop0.epc(), 0x8000_0000);
+        assert_eq!(cpu.cop0.bad_vaddr(), 0x0000_0001);
+        assert_eq!(cpu.cop0.cause() & CAUSE_BD, 0);
+        assert_eq!((cpu.cop0.cause() >> 2) & 0x1f, 5);
+        assert_eq!(bus.read32(0), i(0x2b, 0, 1, 1));
     }
 
     #[test]

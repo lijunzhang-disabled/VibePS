@@ -141,3 +141,102 @@ pub enum ExeLoadError {
     TruncatedPayload,
     LoadAddressOutOfRange,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{ExeLoadError, Ps1, BIOS_SIZE};
+    use crate::cpu::cop0::STATUS_BEV;
+
+    fn i(op: u32, rs: u32, rt: u32, imm: i16) -> u32 {
+        (op << 26) | (rs << 21) | (rt << 16) | (imm as u16 as u32)
+    }
+
+    fn write_le_u32(bytes: &mut [u8], offset: usize, value: u32) {
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn psx_exe(payload: &[u8], load_addr: u32, pc: u32) -> Vec<u8> {
+        let mut exe = vec![0; 0x800 + payload.len()];
+        exe[0..8].copy_from_slice(b"PS-X EXE");
+        write_le_u32(&mut exe, 0x10, pc);
+        write_le_u32(&mut exe, 0x14, 0x8000_4000);
+        write_le_u32(&mut exe, 0x18, load_addr);
+        write_le_u32(&mut exe, 0x1c, payload.len() as u32);
+        write_le_u32(&mut exe, 0x30, 0x801f_0000);
+        write_le_u32(&mut exe, 0x34, 0x100);
+        exe[0x800..].copy_from_slice(payload);
+        exe
+    }
+
+    #[test]
+    fn boots_from_supplied_bios_image() {
+        let mut bios = vec![0; BIOS_SIZE];
+        write_le_u32(&mut bios, 0, i(0x09, 0, 2, 0x1234)); // addiu r2,r0,0x1234
+        write_le_u32(&mut bios, 4, i(0x2b, 0, 2, 0x100)); // sw r2,0x100(r0)
+        let mut ps1 = Ps1::new(Some(bios));
+
+        ps1.step_one();
+        ps1.step_one();
+
+        assert_eq!(ps1.cpu.regs[2], 0x1234);
+        assert_eq!(ps1.bus.read32(0x0000_0100), 0x1234);
+    }
+
+    #[test]
+    fn reset_returns_cpu_to_bios_boot_vector() {
+        let mut ps1 = Ps1::new(None);
+        ps1.cpu.set_pc(0x8000_0000);
+        ps1.cpu.regs[1] = 0x1234;
+
+        ps1.reset();
+
+        assert_eq!(ps1.cpu.pc, 0xbfc0_0000);
+        assert_eq!(ps1.cpu.next_pc, 0xbfc0_0004);
+        assert_eq!(ps1.cpu.regs[1], 0);
+        assert_ne!(ps1.cpu.cop0.status() & STATUS_BEV, 0);
+    }
+
+    #[test]
+    fn loads_psx_exe_payload_and_initial_registers() {
+        let exe = psx_exe(&0x1234_5678u32.to_le_bytes(), 0x8001_0000, 0x8001_0000);
+        let mut ps1 = Ps1::new(None);
+
+        ps1.load_psx_exe(&exe).unwrap();
+
+        assert_eq!(ps1.cpu.pc, 0x8001_0000);
+        assert_eq!(ps1.cpu.next_pc, 0x8001_0004);
+        assert_eq!(ps1.cpu.regs[28], 0x8000_4000);
+        assert_eq!(ps1.cpu.regs[29], 0x801f_0100);
+        assert_eq!(ps1.bus.read32(0x8001_0000), 0x1234_5678);
+    }
+
+    #[test]
+    fn rejects_invalid_psx_exe_header() {
+        let mut ps1 = Ps1::new(None);
+
+        let err = ps1.load_psx_exe(&vec![0; 0x800]).unwrap_err();
+
+        assert_eq!(err, ExeLoadError::InvalidHeader);
+    }
+
+    #[test]
+    fn rejects_truncated_psx_exe_payload() {
+        let mut exe = psx_exe(&[1, 2, 3], 0x8001_0000, 0x8001_0000);
+        write_le_u32(&mut exe, 0x1c, 4);
+        let mut ps1 = Ps1::new(None);
+
+        let err = ps1.load_psx_exe(&exe).unwrap_err();
+
+        assert_eq!(err, ExeLoadError::TruncatedPayload);
+    }
+
+    #[test]
+    fn rejects_psx_exe_payload_that_crosses_ram_end() {
+        let exe = psx_exe(&[1, 2, 3, 4], 0x801f_fffe, 0x8001_0000);
+        let mut ps1 = Ps1::new(None);
+
+        let err = ps1.load_psx_exe(&exe).unwrap_err();
+
+        assert_eq!(err, ExeLoadError::LoadAddressOutOfRange);
+    }
+}

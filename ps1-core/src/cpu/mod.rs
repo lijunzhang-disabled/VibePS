@@ -109,7 +109,9 @@ impl Cpu {
 
         self.load_delay_merge = None;
         if let Some((reg, value)) = delayed_load {
-            if (self.reg_write_mask & (1 << reg)) == 0 {
+            let next_load_to_same_reg =
+                matches!(self.load_delay, Some((next_reg, _)) if next_reg == reg);
+            if !next_load_to_same_reg && (self.reg_write_mask & (1 << reg)) == 0 {
                 self.write_reg_now(reg, value);
             }
         }
@@ -336,7 +338,11 @@ impl Cpu {
         self.next_is_delay_slot = true;
         if condition {
             let offset = ((opcode as i16 as i32) << 2) as u32;
-            let target = pc.wrapping_add(4).wrapping_add(offset);
+            let target = if self.in_delay_slot {
+                self.pc.wrapping_add(offset)
+            } else {
+                pc.wrapping_add(4).wrapping_add(offset)
+            };
             self.next_pc = target;
             self.next_delay_slot_branch_taken = true;
             self.next_delay_slot_branch_target = target;
@@ -667,6 +673,10 @@ mod tests {
         (op << 26) | ((target >> 2) & 0x03ff_ffff)
     }
 
+    fn jr(reg: u32) -> u32 {
+        r(reg, 0, 0, 0, 0x08)
+    }
+
     fn cop(op: u32, rs: u32, rt: u32, rd: u32, funct: u32) -> u32 {
         (op << 26) | (rs << 21) | (rt << 16) | (rd << 11) | funct
     }
@@ -755,6 +765,329 @@ mod tests {
 
         assert_eq!(cpu.regs[2], 0);
         assert_eq!(cpu.regs[3], 0x8000_0010);
+    }
+
+    #[test]
+    fn consecutive_loads_to_same_register_keep_first_load_invisible() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(None);
+        cpu.set_pc(0x8000_0000);
+        cpu.regs[5] = 4;
+        bus.write32(0x0000_0100, 1);
+        bus.write32(0x0000_0104, 2);
+        write_program(
+            &mut bus,
+            0x0000_0000,
+            &[
+                i(0x09, 0, 4, 0x100), // addiu a0,r0,0x100
+                i(0x23, 4, 5, 0),     // lw a1,0(a0)
+                i(0x23, 4, 5, 4),     // lw a1,4(a0)
+                r(5, 0, 2, 0, 0x21),  // move v0,a1; sees original
+                r(5, 0, 3, 0, 0x21),  // move v1,a1; sees second load
+            ],
+        );
+
+        for _ in 0..5 {
+            cpu.step(&mut bus);
+        }
+
+        assert_eq!(cpu.regs[2], 4);
+        assert_eq!(cpu.regs[3], 2);
+    }
+
+    #[test]
+    fn pcsx_lwl_lwr_no_delay_reads_original_register() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(None);
+        cpu.set_pc(0x8000_0000);
+        cpu.regs[5] = 0xaabb_ccdd;
+        bus.write32(0x0000_0100, 0x1122_3344);
+        bus.write32(0x0000_0104, 0x5566_7788);
+        write_program(
+            &mut bus,
+            0x0000_0000,
+            &[
+                i(0x09, 0, 4, 0x100), // addiu a0,r0,0x100
+                i(0x22, 4, 5, 4),     // lwl a1,4(a0)
+                i(0x26, 4, 5, 1),     // lwr a1,1(a0)
+                r(5, 0, 2, 0, 0x21),  // move v0,a1; no delay, sees original
+                r(5, 0, 3, 0, 0x21),  // move v1,a1; now sees merged load
+            ],
+        );
+
+        for _ in 0..5 {
+            cpu.step(&mut bus);
+        }
+
+        assert_eq!(cpu.regs[2], 0xaabb_ccdd);
+        assert_eq!(cpu.regs[3], 0x8811_2233);
+    }
+
+    #[test]
+    fn pcsx_lwl_lwr_delayed_cases_merge_pending_loads() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(None);
+        cpu.set_pc(0x8000_0000);
+        cpu.regs[5] = 0xaabb_ccdd;
+        bus.write32(0x0000_0100, 0x1122_3344);
+        bus.write32(0x0000_0104, 0x5566_7788);
+        write_program(
+            &mut bus,
+            0x0000_0000,
+            &[
+                i(0x09, 0, 4, 0x100), // addiu a0,r0,0x100
+                i(0x22, 4, 5, 4),     // lwl a1,4(a0)
+                0x0000_0000,          // wait one instruction
+                r(5, 0, 2, 0, 0x21),  // move v0,a1
+                i(0x22, 4, 5, 4),     // lwl a1,4(a0)
+                i(0x26, 4, 5, 1),     // lwr a1,1(a0)
+                0x0000_0000,          // wait one instruction
+                r(5, 0, 3, 0, 0x21),  // move v1,a1
+            ],
+        );
+
+        for _ in 0..8 {
+            cpu.step(&mut bus);
+        }
+
+        assert_eq!(cpu.regs[2], 0x88bb_ccdd);
+        assert_eq!(cpu.regs[3], 0x8811_2233);
+    }
+
+    #[test]
+    fn pcsx_unaligned_load_pairs_merge_different_words_and_lw_base() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(None);
+        cpu.set_pc(0x8000_0000);
+        cpu.regs[5] = 0xeeff_effe;
+        bus.write32(0x0000_0100, 0x1122_3344);
+        bus.write32(0x0000_0104, 0x5566_7788);
+        bus.write32(0x0000_0108, 0xaabb_ccdd);
+        write_program(
+            &mut bus,
+            0x0000_0000,
+            &[
+                i(0x09, 0, 4, 0x100), // addiu a0,r0,0x100
+                i(0x22, 4, 5, 4),     // lwl a1,4(a0)
+                i(0x26, 4, 5, 5),     // lwr a1,5(a0)
+                0x0000_0000,          // wait one instruction
+                r(5, 0, 2, 0, 0x21),  // move v0,a1
+                i(0x23, 4, 5, 8),     // lw a1,8(a0)
+                i(0x26, 4, 5, 1),     // lwr a1,1(a0)
+                0x0000_0000,          // wait one instruction
+                r(5, 0, 3, 0, 0x21),  // move v1,a1
+            ],
+        );
+
+        for _ in 0..9 {
+            cpu.step(&mut bus);
+        }
+
+        assert_eq!(cpu.regs[2], 0x8855_6677);
+        assert_eq!(cpu.regs[3], 0xaa11_2233);
+    }
+
+    #[test]
+    fn pcsx_divide_by_zero_results_match_r3000a() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(None);
+        cpu.set_pc(0x8000_0000);
+        write_program(
+            &mut bus,
+            0x0000_0000,
+            &[
+                i(0x09, 0, 1, 42),   // addiu r1,r0,42
+                r(1, 0, 0, 0, 0x1a), // div r1,r0
+                r(0, 0, 2, 0, 0x10), // mfhi r2
+                r(0, 0, 3, 0, 0x12), // mflo r3
+                i(0x09, 0, 4, -42),  // addiu r4,r0,-42
+                r(4, 0, 0, 0, 0x1a), // div r4,r0
+                r(0, 0, 5, 0, 0x10), // mfhi r5
+                r(0, 0, 6, 0, 0x12), // mflo r6
+                r(1, 0, 0, 0, 0x1b), // divu r1,r0
+                r(0, 0, 7, 0, 0x10), // mfhi r7
+                r(0, 0, 8, 0, 0x12), // mflo r8
+            ],
+        );
+
+        for _ in 0..11 {
+            cpu.step(&mut bus);
+        }
+
+        assert_eq!(cpu.regs[2], 42);
+        assert_eq!(cpu.regs[3], 0xffff_ffff);
+        assert_eq!(cpu.regs[5], (-42i32) as u32);
+        assert_eq!(cpu.regs[6], 1);
+        assert_eq!(cpu.regs[7], 42);
+        assert_eq!(cpu.regs[8], 0xffff_ffff);
+    }
+
+    #[test]
+    fn pcsx_bltzal_not_taken_still_writes_link_register() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(None);
+        cpu.set_pc(0x8000_0000);
+        write_program(
+            &mut bus,
+            0x0000_0000,
+            &[
+                i(0x01, 0, 0x10, 1),  // bltzal r0,+1; not taken, but links
+                0x0000_0000,          // delay slot
+                r(31, 0, 2, 0, 0x21), // move v0,ra
+                i(0x09, 0, 3, 1),     // addiu r3,r0,1; confirms fallthrough
+            ],
+        );
+
+        for _ in 0..4 {
+            cpu.step(&mut bus);
+        }
+
+        assert_eq!(cpu.regs[2], 0x8000_0008);
+        assert_eq!(cpu.regs[3], 1);
+    }
+
+    #[test]
+    fn pcsx_branch_in_branch_delay_slot_uses_current_pc_base() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(None);
+        cpu.set_pc(0x8000_0000);
+        cpu.regs[31] = 0x8000_003c;
+        write_program(
+            &mut bus,
+            0x0000_0000,
+            &[
+                i(0x09, 0, 2, 1),   // li v0,1
+                i(0x04, 0, 0, 4),   // b t1branch1
+                i(0x04, 0, 0, 6),   // b t1branch2; delay slot of first branch
+                i(0x0d, 2, 2, 2),   // no
+                jr(31),             // no
+                i(0x0d, 2, 2, 4),   // no
+                i(0x0d, 2, 2, 8),   // t1branch1: yes
+                jr(31),             // no
+                i(0x0d, 2, 2, 16),  // no
+                i(0x0d, 2, 2, 32),  // t1branch2: no
+                jr(31),             // no
+                i(0x0d, 2, 2, 64),  // no
+                i(0x0d, 2, 2, 128), // yes
+                jr(31),             // return
+                i(0x0d, 2, 2, 256), // delay slot: yes
+                0x0000_0000,        // return target
+            ],
+        );
+
+        for _ in 0..7 {
+            cpu.step(&mut bus);
+        }
+
+        assert_eq!(cpu.regs[2], 0x189);
+    }
+
+    #[test]
+    fn pcsx_branch_in_branch_delay_slot_execution_order() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(None);
+        cpu.set_pc(0x8000_0000);
+        cpu.regs[31] = 0x8000_003c;
+        write_program(
+            &mut bus,
+            0x0000_0000,
+            &[
+                i(0x09, 0, 2, 1),    // li v0,1
+                i(0x04, 0, 0, 4),    // b t2branch1
+                i(0x04, 0, 0, 6),    // b t2branch2; delay slot of first branch
+                i(0x09, 2, 2, 3),    // no
+                jr(31),              // no
+                r(0, 0, 2, 0, 0x21), // no
+                i(0x09, 2, 2, 1),    // t2branch1: v0=2
+                jr(31),              // no
+                r(0, 0, 2, 0, 0x21), // no
+                r(0, 2, 2, 3, 0x00), // t2branch2: no
+                jr(31),              // no
+                i(0x09, 2, 2, 5),    // no
+                r(0, 2, 2, 2, 0x00), // v0=8
+                jr(31),              // return
+                i(0x09, 2, 2, 1),    // delay slot: v0=9
+                0x0000_0000,
+            ],
+        );
+
+        for _ in 0..7 {
+            cpu.step(&mut bus);
+        }
+
+        assert_eq!(cpu.regs[2], 9);
+    }
+
+    #[test]
+    fn pcsx_jump_in_jump_delay_slot_uses_absolute_second_target() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(None);
+        cpu.set_pc(0x8000_0000);
+        cpu.regs[31] = 0x8000_003c;
+        write_program(
+            &mut bus,
+            0x0000_0000,
+            &[
+                i(0x09, 0, 2, 1),     // li v0,1
+                j(0x02, 0x8000_0018), // j t1jump1
+                j(0x02, 0x8000_0024), // j t1jump2; delay slot
+                i(0x0d, 2, 2, 2),     // no
+                jr(31),               // no
+                i(0x0d, 2, 2, 4),     // no
+                i(0x0d, 2, 2, 8),     // t1jump1: yes
+                jr(31),               // no
+                i(0x0d, 2, 2, 16),    // no
+                i(0x0d, 2, 2, 32),    // t1jump2: yes
+                jr(31),               // return
+                i(0x0d, 2, 2, 64),    // delay slot: yes
+                i(0x0d, 2, 2, 128),   // no
+                jr(31),               // no
+                i(0x0d, 2, 2, 256),   // no
+                0x0000_0000,
+            ],
+        );
+
+        for _ in 0..7 {
+            cpu.step(&mut bus);
+        }
+
+        assert_eq!(cpu.regs[2], 0x69);
+    }
+
+    #[test]
+    fn pcsx_jump_in_jump_delay_slot_execution_order() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(None);
+        cpu.set_pc(0x8000_0000);
+        cpu.regs[31] = 0x8000_003c;
+        write_program(
+            &mut bus,
+            0x0000_0000,
+            &[
+                i(0x09, 0, 2, 1),     // li v0,1
+                j(0x02, 0x8000_0018), // j t2jump1
+                j(0x02, 0x8000_0024), // j t2jump2; delay slot
+                i(0x09, 2, 2, 3),     // no
+                jr(31),               // no
+                r(0, 0, 2, 0, 0x21),  // no
+                i(0x09, 2, 2, 1),     // t2jump1: v0=2
+                jr(31),               // no
+                r(0, 0, 2, 0, 0x21),  // no
+                r(0, 2, 2, 3, 0x00),  // t2jump2: v0=16
+                jr(31),               // return
+                i(0x09, 2, 2, 5),     // delay slot: v0=21
+                r(0, 2, 2, 2, 0x00),  // no
+                jr(31),               // no
+                i(0x09, 2, 2, 1),     // no
+                0x0000_0000,
+            ],
+        );
+
+        for _ in 0..7 {
+            cpu.step(&mut bus);
+        }
+
+        assert_eq!(cpu.regs[2], 21);
     }
 
     #[test]

@@ -5,6 +5,7 @@
 - Unit-test every R3000A integer opcode class.
 - Add focused tests for branch-delay EPC/BD behavior.
 - Add unaligned `LWL/LWR/SWL/SWR` tests.
+- Continue porting low-level PCSX-Redux CPU/COP0 tests into native core tests until a MIPS PS-EXE toolchain is available.
 - Add DMA2 GPU packet and DMA6 OTC tests.
 
 ## Bring-Up

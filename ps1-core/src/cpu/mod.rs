@@ -17,6 +17,7 @@ pub struct Cpu {
     pub gte: Gte,
     load_delay: Option<(usize, u32)>,
     load_delay_merge: Option<(usize, u32)>,
+    reg_write_mask: u32,
     in_delay_slot: bool,
     in_delay_slot_branch_taken: bool,
     in_delay_slot_branch_target: u32,
@@ -38,6 +39,7 @@ impl Cpu {
             gte: Gte::new(),
             load_delay: None,
             load_delay_merge: None,
+            reg_write_mask: 0,
             in_delay_slot: false,
             in_delay_slot_branch_taken: false,
             in_delay_slot_branch_target: 0,
@@ -63,6 +65,7 @@ impl Cpu {
         self.next_delay_slot_branch_target = 0;
         self.load_delay = None;
         self.load_delay_merge = None;
+        self.reg_write_mask = 0;
     }
 
     pub fn step(&mut self, bus: &mut Bus) -> u32 {
@@ -88,6 +91,7 @@ impl Cpu {
         let opcode = bus.read32(pc);
         let delayed_load = self.load_delay.take();
         self.load_delay_merge = delayed_load;
+        self.reg_write_mask = 0;
         let was_delay_slot = self.next_is_delay_slot;
         let was_delay_slot_branch_taken = self.next_delay_slot_branch_taken;
         let was_delay_slot_branch_target = self.next_delay_slot_branch_target;
@@ -105,8 +109,11 @@ impl Cpu {
 
         self.load_delay_merge = None;
         if let Some((reg, value)) = delayed_load {
-            self.write_reg_now(reg, value);
+            if (self.reg_write_mask & (1 << reg)) == 0 {
+                self.write_reg_now(reg, value);
+            }
         }
+        self.reg_write_mask = 0;
         self.regs[0] = 0;
         self.in_delay_slot = false;
         self.in_delay_slot_branch_taken = false;
@@ -555,6 +562,7 @@ impl Cpu {
 
     fn set_reg(&mut self, index: usize, value: u32) {
         if index != 0 {
+            self.reg_write_mask |= 1 << index;
             self.regs[index] = value;
         }
     }
@@ -597,6 +605,7 @@ impl Cpu {
         self.next_delay_slot_branch_target = 0;
         self.load_delay = None;
         self.load_delay_merge = None;
+        self.reg_write_mask = 0;
     }
 }
 
@@ -654,6 +663,10 @@ mod tests {
         (rs << 21) | (rt << 16) | (rd << 11) | (shamt << 6) | funct
     }
 
+    fn j(op: u32, target: u32) -> u32 {
+        (op << 26) | ((target >> 2) & 0x03ff_ffff)
+    }
+
     fn cop(op: u32, rs: u32, rt: u32, rd: u32, funct: u32) -> u32 {
         (op << 26) | (rs << 21) | (rt << 16) | (rd << 11) | funct
     }
@@ -691,6 +704,57 @@ mod tests {
         assert_eq!(cpu.regs[3], 0x12ff);
         assert_eq!(cpu.regs[4], 0x12ff);
         assert_eq!(cpu.regs[5], 0x25fe);
+    }
+
+    #[test]
+    fn register_write_cancels_pending_load_to_same_register() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(None);
+        cpu.set_pc(0x8000_0000);
+        write_program(
+            &mut bus,
+            0x0000_0000,
+            &[
+                i(0x09, 0, 1, 0x100),  // addiu r1,r0,0x100
+                i(0x09, 0, 2, 0x1234), // addiu r2,r0,0x1234
+                i(0x2b, 1, 2, 0),      // sw r2,0(r1)
+                i(0x23, 1, 3, 0),      // lw r3,0(r1)
+                i(0x09, 0, 3, 0x55aa), // addiu r3,r0,0x55aa cancels the load
+                0x0000_0000,
+            ],
+        );
+
+        for _ in 0..6 {
+            cpu.step(&mut bus);
+        }
+
+        assert_eq!(cpu.regs[3], 0x55aa);
+    }
+
+    #[test]
+    fn jal_link_cancels_pending_load_to_ra() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(None);
+        cpu.set_pc(0x8000_0000);
+        write_program(
+            &mut bus,
+            0x0000_0000,
+            &[
+                i(0x09, 0, 1, 0x100), // addiu r1,r0,0x100; RAM at 0x100 is zero
+                i(0x23, 1, 31, 0),    // lw ra,0(r1)
+                j(0x03, 0x8000_0014), // jal target; link should survive old pending load
+                0x0000_0000,          // delay slot
+                i(0x09, 0, 2, 1),     // skipped
+                r(31, 0, 3, 0, 0x21), // addu r3,ra,r0
+            ],
+        );
+
+        for _ in 0..6 {
+            cpu.step(&mut bus);
+        }
+
+        assert_eq!(cpu.regs[2], 0);
+        assert_eq!(cpu.regs[3], 0x8000_0010);
     }
 
     #[test]

@@ -11,15 +11,15 @@ This repository currently contains the first implementation slice:
 - PS1 virtual-to-physical memory map, RAM, scratchpad, BIOS ROM, and MMIO
 - BIU/cache-control register, isolated-cache data access behavior, cached
   KUSEG/KSEG0 instruction fetches, and uncached KSEG1 fetches
-- Interrupt controller, root-counter timers, DMA register model, and GPU/SPU/CD
-  scaffolding
+- Interrupt controller, root-counter timer modes, DMA channel modes/IRQs,
+  GPU linked-list DMA, OTC, and GPU/SPU/CD scaffolding
 - Minimal PS-X EXE loader and CLI runner with BIOS boot trace output
 - Focused unit tests for CPU and memory behavior
 
-It is not yet a playable emulator. Phase 1 CPU/bus and Phase 2 BIOS boot
-bring-up are complete enough to move on. The next milestones are DMA/timer/IRQ
-accuracy, GPU command rendering, CD-ROM sector delivery, GTE, SPU, controllers,
-memory cards, and an SDL frontend.
+It is not yet a playable emulator. Phase 1 CPU/bus, Phase 2 BIOS boot bring-up,
+and Phase 3 DMA/timer/IRQ behavior are complete enough to move on. The next
+milestones are GPU command rendering, CD-ROM sector delivery, GTE, SPU,
+controllers, memory cards, and an SDL frontend.
 
 ## Run
 

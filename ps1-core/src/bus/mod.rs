@@ -429,9 +429,11 @@ impl Bus {
             0x1f80_1070 => self.irq.acknowledge(value as u16),
             0x1f80_1074 => self.irq.set_mask(value as u16),
             0x1f80_1080..=0x1f80_10ff => {
-                if let Some(channel) = self.dma.write32(phys - 0x1f80_1080, value) {
-                    self.run_dma(channel);
+                let result = self.dma.write32(phys - 0x1f80_1080, value);
+                if result.irq_edge {
+                    self.irq.request(IRQ_DMA);
                 }
+                self.run_pending_dma();
             }
             0x1f80_1100..=0x1f80_112f => self.timers.write16(phys - 0x1f80_1100, value as u16),
             0x1f80_1810 => self.gpu.write_gp0(value),
@@ -448,28 +450,69 @@ impl Bus {
         }
     }
 
-    fn run_dma(&mut self, channel: usize) {
-        if !self.dma.master_enabled(channel) {
-            return;
+    fn run_pending_dma(&mut self) {
+        let mut guard = 0usize;
+        while let Some(channel) = self.dma.next_pending_channel() {
+            self.run_dma(channel);
+            guard += 1;
+            if guard > 32 {
+                break;
+            }
         }
+    }
+
+    fn run_dma(&mut self, channel: usize) {
         let ch = self.dma.channel(channel);
-        match channel {
+        let result = match channel {
+            0 => self.run_mdec_in_dma(ch),
+            1 => self.run_mdec_out_dma(ch),
             2 if ch.sync_mode() == 2 && ch.from_ram() => self.run_gpu_linked_list_dma(ch.madr),
             2 => self.run_gpu_dma(ch),
             3 => self.run_cdrom_dma(ch),
             4 => self.run_spu_dma(ch),
             6 => self.run_otc_dma(ch),
-            _ => {}
-        }
-        if self.dma.complete_channel(channel) {
+            _ => DmaTransferResult::default(),
+        };
+        if self.dma.complete_channel(
+            channel,
+            result.final_madr,
+            result.final_bcr,
+            result.bus_error,
+        ) {
             self.irq.request(IRQ_DMA);
         }
     }
 
-    fn run_gpu_linked_list_dma(&mut self, start: u32) {
+    fn run_mdec_in_dma(&mut self, ch: crate::dma::DmaChannel) -> DmaTransferResult {
+        if !ch.from_ram() {
+            return DmaTransferResult::default();
+        }
+        let mut addr = ch.madr & 0x001f_fffc;
+        for _ in 0..dma_word_count(ch.bcr, ch.sync_mode()) {
+            let word = self.read_ram32(addr);
+            self.mdec.write_data(word);
+            addr = addr.wrapping_add(4) & 0x001f_fffc;
+        }
+        dma_transfer_result(ch, addr)
+    }
+
+    fn run_mdec_out_dma(&mut self, ch: crate::dma::DmaChannel) -> DmaTransferResult {
+        if ch.from_ram() {
+            return DmaTransferResult::default();
+        }
+        let mut addr = ch.madr & 0x001f_fffc;
+        for _ in 0..dma_word_count(ch.bcr, ch.sync_mode()) {
+            let word = self.mdec.read_data();
+            self.write_ram32(addr, word);
+            addr = addr.wrapping_add(4) & 0x001f_fffc;
+        }
+        dma_transfer_result(ch, addr)
+    }
+
+    fn run_gpu_linked_list_dma(&mut self, start: u32) -> DmaTransferResult {
         let mut addr = start & 0x001f_fffc;
         let mut guard = 0usize;
-        loop {
+        let final_madr = loop {
             let header = self.read_ram32(addr);
             let words = (header >> 24) as usize;
             for i in 0..words {
@@ -477,17 +520,21 @@ impl Bus {
                 self.gpu.write_gp0(word);
             }
             if (header & 0x0080_0000) != 0 {
-                break;
+                break header & 0x00ff_fffc;
             }
             addr = header & 0x001f_fffc;
             guard += 1;
             if guard > 0x20_000 {
-                break;
+                break addr;
             }
+        };
+        DmaTransferResult {
+            final_madr: Some(final_madr),
+            ..DmaTransferResult::default()
         }
     }
 
-    fn run_gpu_dma(&mut self, ch: crate::dma::DmaChannel) {
+    fn run_gpu_dma(&mut self, ch: crate::dma::DmaChannel) -> DmaTransferResult {
         let mut addr = ch.madr & 0x001f_fffc;
         let count = dma_word_count(ch.bcr, ch.sync_mode());
         let step = if ch.step_backwards() { -4i32 } else { 4i32 };
@@ -501,11 +548,12 @@ impl Bus {
             }
             addr = addr.wrapping_add(step as u32) & 0x001f_fffc;
         }
+        dma_transfer_result(ch, addr)
     }
 
-    fn run_cdrom_dma(&mut self, ch: crate::dma::DmaChannel) {
+    fn run_cdrom_dma(&mut self, ch: crate::dma::DmaChannel) -> DmaTransferResult {
         if ch.from_ram() {
-            return;
+            return DmaTransferResult::default();
         }
         let mut addr = ch.madr & 0x001f_fffc;
         for _ in 0..dma_word_count(ch.bcr, ch.sync_mode()) {
@@ -513,9 +561,10 @@ impl Bus {
             self.write_ram32(addr, word);
             addr = addr.wrapping_add(4) & 0x001f_fffc;
         }
+        dma_transfer_result(ch, addr)
     }
 
-    fn run_spu_dma(&mut self, ch: crate::dma::DmaChannel) {
+    fn run_spu_dma(&mut self, ch: crate::dma::DmaChannel) -> DmaTransferResult {
         let mut addr = ch.madr & 0x001f_fffc;
         for _ in 0..dma_word_count(ch.bcr, ch.sync_mode()) {
             if ch.from_ram() {
@@ -527,9 +576,10 @@ impl Bus {
             }
             addr = addr.wrapping_add(4) & 0x001f_fffc;
         }
+        dma_transfer_result(ch, addr)
     }
 
-    fn run_otc_dma(&mut self, ch: crate::dma::DmaChannel) {
+    fn run_otc_dma(&mut self, ch: crate::dma::DmaChannel) -> DmaTransferResult {
         let count = (ch.bcr & 0xffff).max(1);
         let mut addr = ch.madr & 0x001f_fffc;
         for i in 0..count {
@@ -541,6 +591,7 @@ impl Bus {
             self.write_ram32(addr, value);
             addr = addr.wrapping_sub(4) & 0x001f_fffc;
         }
+        DmaTransferResult::default()
     }
 
     fn read_ram32(&self, addr: u32) -> u32 {
@@ -572,18 +623,40 @@ fn dma_word_count(bcr: u32, sync_mode: u32) -> u32 {
     match sync_mode {
         0 => {
             let words = bcr & 0xffff;
-            if words == 0 {
-                0x1_0000
-            } else {
-                words
-            }
+            dma_count_part(words)
         }
         1 => {
-            let block_size = bcr & 0xffff;
-            let block_count = (bcr >> 16) & 0xffff;
-            block_size.max(1) * block_count.max(1)
+            let block_size = dma_count_part(bcr & 0xffff);
+            let block_count = dma_count_part((bcr >> 16) & 0xffff);
+            block_size.saturating_mul(block_count)
         }
         _ => 0,
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct DmaTransferResult {
+    final_madr: Option<u32>,
+    final_bcr: Option<u32>,
+    bus_error: bool,
+}
+
+fn dma_transfer_result(ch: crate::dma::DmaChannel, final_addr: u32) -> DmaTransferResult {
+    match ch.sync_mode() {
+        1 => DmaTransferResult {
+            final_madr: Some(final_addr),
+            final_bcr: Some(ch.bcr & 0x0000_ffff),
+            ..DmaTransferResult::default()
+        },
+        _ => DmaTransferResult::default(),
+    }
+}
+
+fn dma_count_part(value: u32) -> u32 {
+    if value == 0 {
+        0x1_0000
+    } else {
+        value
     }
 }
 
@@ -621,6 +694,7 @@ fn icache_line_index(addr: u32) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{Bus, BCC_IS1, BCC_TAG, DEFAULT_CACHE_CONTROL};
+    use crate::interrupt::IRQ_DMA;
 
     #[test]
     fn maps_ram_through_kseg0_and_kseg1() {
@@ -682,5 +756,61 @@ mod tests {
 
         assert_eq!(bus.isolated_cache_read32(0x0000_0004), 0x1234_5678);
         assert_eq!(bus.read32(0x0000_0004), 0);
+    }
+
+    #[test]
+    fn dma2_linked_list_sends_gp0_packets_and_updates_madr() {
+        let mut bus = Bus::new(None);
+        bus.write32(0x0000_0100, 0x03ff_ffff);
+        bus.write32(0x0000_0104, 0x0200_00ff); // fill rect, red
+        bus.write32(0x0000_0108, 0x0000_0000); // xy
+        bus.write32(0x0000_010c, 0x0001_0001); // 16x1 after fill alignment
+        bus.write32(0x1f80_10f0, 1 << 11);
+        bus.write32(0x1f80_10a0, 0x0000_0100);
+
+        bus.write32(0x1f80_10a8, 0x0100_0401);
+
+        assert_eq!(bus.gpu.vram()[0], 0x001f);
+        assert_eq!(bus.gpu.vram()[15], 0x001f);
+        assert_eq!(bus.gpu.vram()[16], 0x0000);
+        assert_eq!(bus.read32(0x1f80_10a0), 0x00ff_fffc);
+        assert_eq!(bus.read32(0x1f80_10a8) & (1 << 24), 0);
+    }
+
+    #[test]
+    fn dma2_sync1_vram_upload_updates_madr_and_block_count() {
+        let mut bus = Bus::new(None);
+        bus.write32(0x0000_0100, 0xa000_0000); // cpu-to-vram
+        bus.write32(0x0000_0104, 0x0000_0000); // xy
+        bus.write32(0x0000_0108, 0x0001_0002); // width=2,height=1
+        bus.write32(0x0000_010c, 0x2222_1111);
+        bus.write32(0x1f80_10f0, 1 << 11);
+        bus.write32(0x1f80_10a0, 0x0000_0100);
+        bus.write32(0x1f80_10a4, (1 << 16) | 4);
+
+        bus.write32(0x1f80_10a8, 0x0100_0201);
+
+        assert_eq!(bus.gpu.vram()[0], 0x1111);
+        assert_eq!(bus.gpu.vram()[1], 0x2222);
+        assert_eq!(bus.read32(0x1f80_10a0), 0x0000_0110);
+        assert_eq!(bus.read32(0x1f80_10a4), 0x0000_0004);
+    }
+
+    #[test]
+    fn dma6_otc_clears_ordering_table_and_requests_irq_when_enabled() {
+        let mut bus = Bus::new(None);
+        bus.write32(0x1f80_10f0, 1 << 27);
+        bus.write32(0x1f80_10f4, (1 << 23) | (1 << 22));
+        bus.write32(0x1f80_10e0, 0x0000_010c);
+        bus.write32(0x1f80_10e4, 4);
+
+        bus.write32(0x1f80_10e8, 0x1100_0002);
+
+        assert_eq!(bus.read32(0x0000_010c), 0x0000_0108);
+        assert_eq!(bus.read32(0x0000_0108), 0x0000_0104);
+        assert_eq!(bus.read32(0x0000_0104), 0x0000_0100);
+        assert_eq!(bus.read32(0x0000_0100), 0x00ff_ffff);
+        assert_ne!(bus.read32(0x1f80_10f4) & ((1 << 31) | (1 << 30)), 0);
+        assert_ne!(bus.irq.status() & IRQ_DMA, 0);
     }
 }

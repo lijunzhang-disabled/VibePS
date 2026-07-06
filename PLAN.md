@@ -7,7 +7,7 @@
 | Phase 0: Research + skeleton | Done | Workspace, architecture docs, core crate, CLI harness |
 | Phase 1: CPU + memory bus | Done | R3000A integer core, COP0, load/branch delays, memory map, bus faults, tests |
 | Phase 2: BIOS boot | Done | BIOS boot trace CLI, BCC/cache isolation, i-cache fetch model, PS-X EXE loader |
-| Phase 3: DMA + timers + IRQs | Started | Real DMA timing, root-counter sync, interrupt edge behavior |
+| Phase 3: DMA + timers + IRQs | Done | DMA modes/channels, GPU linked lists, OTC, DICR/DPCR IRQs, root-counter modes |
 | Phase 4: GPU | Pending | GP0/GP1 parser, VRAM transfers, polygons, rectangles, display output |
 | Phase 5: CD-ROM | Pending | Command/status machine, sector reads, ISO/BIN/CUE, XA timing |
 | Phase 6: GTE | Pending | COP2 register model and matrix/vector commands |
@@ -46,10 +46,10 @@
 
 ## Phase 3 Details: DMA + Timers + IRQs
 
-1. Finish DMA channel modes 0, 1, and 2.
-2. Implement GPU linked-list DMA and OTC precisely enough for ordering tables.
-3. Implement DICR/DPCR interrupt behavior.
-4. Finish root-counter target, overflow, one-shot/repeat, pulse/toggle, dotclock, HBlank, and VBlank modes.
+1. Finish DMA channel modes 0, 1, and 2. Done for deterministic immediate transfers, including MADR/BCR completion state where applicable.
+2. Implement GPU linked-list DMA and OTC precisely enough for ordering tables. Done with DMA2 linked-list GP0 packets and DMA6 reverse ordering-table clear tests.
+3. Implement DICR/DPCR interrupt behavior. Done for channel priority/enable, forced burst start, masked completion flags, bus-error/master flags, and IRQ3 master-flag edges.
+4. Finish root-counter target, overflow, one-shot/repeat, pulse/toggle, dotclock, HBlank, and VBlank modes. Done with target/overflow flags, IRQ modes, timer2 divide-by-8, HBlank clock hooks, sync pause/reset/free-run state, and VBlank scheduler edges. Exact GPU-derived dotclock/HBlank timing remains a later accuracy pass.
 
 ## Phase 4 Details: GPU
 
@@ -66,6 +66,7 @@ The PS1 has several accuracy traps that should be handled incrementally:
 - R3000A load delays and branch delay exception EPC/BD behavior
 - COP0 interrupt level behavior tied to `I_STAT & I_MASK`
 - DMA bus stealing and GPU FIFO back-pressure
+- Exact GPU-derived dotclock/HBlank timing and DMA CPU stall windows
 - GPU has no depth buffer; ordering table behavior matters
 - CD-ROM response/data queues and command latency
 - SPU transfer timing and delayed/unstable reads

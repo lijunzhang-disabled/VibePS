@@ -3,7 +3,6 @@
 ## Immediate
 
 - Continue porting low-level PCSX-Redux COP0 debug tests after COP0 breakpoint/watchpoint hardware is implemented.
-- Add DMA2 GPU packet and DMA6 OTC tests.
 
 ## Completed CPU/BIOS Coverage
 
@@ -13,6 +12,15 @@
 - COP0 interrupt mask, BEV vector, RFE, unusable coprocessor, invalid COP0 read, and misaligned fetch/store exception tests.
 - Instruction bus error, data bus error, cached KSEG0 fetch, and uncached KSEG1 fetch tests.
 - Synthetic BIOS boot, CPU reset-to-BIOS, and PS-X EXE loader success/error tests.
+
+## Completed DMA/Timer/IRQ Coverage
+
+- DMA2 linked-list GP0 packet transfer.
+- DMA2 sync1 VRAM upload with MADR/BCR completion state.
+- DMA6 OTC ordering-table clear and IRQ3 request.
+- DICR masked completion flags, bus-error master flag, and DMA6 CHCR restrictions.
+- DMA pending-channel priority and sync0 force-start behavior.
+- Timer target one-shot/repeat, pulse/toggle, timer2 divide-by-8, HBlank clock, and sync pause tests.
 
 ## Bring-Up
 

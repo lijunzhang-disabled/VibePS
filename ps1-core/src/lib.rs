@@ -121,6 +121,8 @@ impl Ps1 {
     fn dispatch_event(&mut self, event: Event) {
         match event.kind {
             EventKind::VBlank => {
+                self.bus.timers.set_vblank(true);
+                self.bus.timers.set_vblank(false);
                 self.bus.irq.request(interrupt::IRQ_VBLANK);
                 self.scheduler.schedule(Event {
                     fire_time: self

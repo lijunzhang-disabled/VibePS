@@ -17,6 +17,8 @@ pub enum Exception {
     Interrupt = 0,
     AddressLoad = 4,
     AddressStore = 5,
+    InstructionBusError = 6,
+    DataBusError = 7,
     Syscall = 8,
     Break = 9,
     ReservedInstruction = 10,

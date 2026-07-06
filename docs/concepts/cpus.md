@@ -13,11 +13,14 @@ The first emulator target is instruction correctness:
 - COP0 interrupt delivery from `SR.IM & Cause.IP`
 - GTE register transfers before full GTE math
 - `SR.IsC` isolated-cache behavior for BIOS cache flush loops
+- Instruction bus errors, data bus errors, and cached KUSEG/KSEG0 fetches
 
 Cycle accuracy comes later. The initial interpreter uses a fixed instruction
 cost so BIOS and test-program control flow can be debugged first.
 
 The BIU/cache-control register at `0xFFFE0130` is modeled as bus state. When
 COP0 `SR.IsC` is set, data loads and stores are redirected to a small isolated
-I-cache model instead of RAM/MMIO. Instruction-cache fetch timing and refill
-accuracy are still future BIOS-trace work.
+I-cache model instead of RAM/MMIO. Normal instruction fetches use the i-cache
+for cached KUSEG/KSEG0 addresses and bypass it for uncached KSEG1 addresses.
+The current model tracks tag matches and per-word valid bits; exact refill
+timing is still a later accuracy pass.

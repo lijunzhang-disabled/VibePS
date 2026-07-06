@@ -5,8 +5,8 @@
 | Phase | Status | Scope |
 |---|---|---|
 | Phase 0: Research + skeleton | Done | Workspace, architecture docs, core crate, CLI harness |
-| Phase 1: CPU + memory bus | In progress | R3000A core, COP0, load/branch delays, memory map, tests |
-| Phase 2: BIOS boot | Started | BIOS boot trace CLI, BCC/cache isolation, then i-cache/write queue refinements |
+| Phase 1: CPU + memory bus | Done | R3000A integer core, COP0, load/branch delays, memory map, bus faults, tests |
+| Phase 2: BIOS boot | Done | BIOS boot trace CLI, BCC/cache isolation, i-cache fetch model, PS-X EXE loader |
 | Phase 3: DMA + timers + IRQs | Started | Real DMA timing, root-counter sync, interrupt edge behavior |
 | Phase 4: GPU | Pending | GP0/GP1 parser, VRAM transfers, polygons, rectangles, display output |
 | Phase 5: CD-ROM | Pending | Command/status machine, sector reads, ISO/BIN/CUE, XA timing |
@@ -30,20 +30,19 @@
 
 ## Phase 1 Details: CPU + Bus
 
-1. Implement all documented R3000A integer opcodes.
-2. Add tests for ALU, branches, load delays, unaligned loads/stores, COP0, and exceptions.
-3. Model KUSEG/KSEG0/KSEG1 physical mirrors.
-4. Add misalignment and bus-error exceptions.
-5. Add instruction tracing compatible with the style used in `../gba` and `../nds`.
+1. Implement all documented R3000A integer opcodes. Done for the integer core; COP2/GTE math remains Phase 6.
+2. Add tests for ALU, branches, load delays, unaligned loads/stores, COP0, and exceptions. Done with native Rust regressions and imported PCSX-Redux CPU cases.
+3. Model KUSEG/KSEG0/KSEG1 physical mirrors. Done for RAM, scratchpad, MMIO, expansion windows, BIOS, and cache-control space.
+4. Add misalignment and bus-error exceptions. Done for AdEL/AdES plus IBE/DBE on non-executable or unmapped accesses.
+5. Add instruction tracing compatible with the style used in `../gba` and `../nds`. Done through the frontend `--trace` harness.
 
 ## Phase 2 Details: BIOS Boot
 
-1. Require a real BIOS first; BIOS HLE can wait.
-2. Boot from `0xBFC00000`.
-3. Record a boot trace with `ps1-frontend --trace` and compare against known-good emulator traces.
-4. Implement i-cache and scratchpad/cache-control behavior only when tests or BIOS traces need it.
-   Current coverage includes the BIU/cache-control register and isolated cache data accesses used by BIOS flush loops.
-5. Keep direct PS-X EXE loading for CPU and demo bring-up.
+1. Require a real BIOS first; BIOS HLE can wait. Done: the harness accepts a user-provided BIOS image and does not implement BIOS HLE.
+2. Boot from `0xBFC00000`. Done in CPU reset and `Ps1::new`.
+3. Record a boot trace with `ps1-frontend --trace` and compare against known-good emulator traces. Done for trace generation; external comparison depends on a user-provided BIOS/reference trace.
+4. Implement i-cache and scratchpad/cache-control behavior only when tests or BIOS traces need it. Done for BCC, isolated cache data accesses, per-word i-cache valid bits, cached KUSEG/KSEG0 fetches, and uncached KSEG1 fetches. Cycle timing remains a later accuracy pass.
+5. Keep direct PS-X EXE loading for CPU and demo bring-up. Done with success and error-path tests.
 
 ## Phase 3 Details: DMA + Timers + IRQs
 

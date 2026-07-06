@@ -9,16 +9,17 @@ This repository currently contains the first implementation slice:
 - Rust workspace with `ps1-core` and `ps1-frontend`
 - MIPS R3000A CPU foundation with branch/load delay behavior
 - PS1 virtual-to-physical memory map, RAM, scratchpad, BIOS ROM, and MMIO
-- BIU/cache-control register and isolated-cache data access behavior for BIOS
-  cache flush bring-up
+- BIU/cache-control register, isolated-cache data access behavior, cached
+  KUSEG/KSEG0 instruction fetches, and uncached KSEG1 fetches
 - Interrupt controller, root-counter timers, DMA register model, and GPU/SPU/CD
   scaffolding
 - Minimal PS-X EXE loader and CLI runner with BIOS boot trace output
 - Focused unit tests for CPU and memory behavior
 
-It is not yet a playable emulator. The next milestones are CPU test coverage,
-BIOS boot correctness, GPU command rendering, CD-ROM sector delivery, GTE, SPU,
-controllers, memory cards, and an SDL frontend.
+It is not yet a playable emulator. Phase 1 CPU/bus and Phase 2 BIOS boot
+bring-up are complete enough to move on. The next milestones are DMA/timer/IRQ
+accuracy, GPU command rendering, CD-ROM sector delivery, GTE, SPU, controllers,
+memory cards, and an SDL frontend.
 
 ## Run
 

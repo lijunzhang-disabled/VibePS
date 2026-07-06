@@ -14,3 +14,8 @@ Important regions:
 GPU VRAM and SPU RAM are not directly CPU-addressable. Software reaches them
 through MMIO registers and DMA.
 
+Cached KUSEG/KSEG0 instruction fetches go through the i-cache model. KSEG1
+instruction fetches bypass it, which is the path used by the reset vector at
+`0xbfc00000`. Instruction fetches from scratchpad, MMIO, KSEG2, or unmapped
+physical space raise instruction bus errors. Data accesses to unmapped space
+raise data bus errors.

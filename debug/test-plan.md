@@ -2,7 +2,6 @@
 
 ## Immediate
 
-- Unit-test every R3000A integer opcode class.
 - Continue porting low-level PCSX-Redux COP0 debug tests after COP0 breakpoint/watchpoint hardware is implemented.
 - Add DMA2 GPU packet and DMA6 OTC tests.
 
@@ -12,6 +11,7 @@
 - Unaligned `LWL/LWR/SWL/SWR` data-path tests.
 - PCSX-Redux CPU regressions for delayed loads, branch-in-delay-slot behavior, jump-in-delay-slot behavior, divide-by-zero, and `BLTZAL` link behavior.
 - COP0 interrupt mask, BEV vector, RFE, unusable coprocessor, invalid COP0 read, and misaligned fetch/store exception tests.
+- Instruction bus error, data bus error, cached KSEG0 fetch, and uncached KSEG1 fetch tests.
 - Synthetic BIOS boot, CPU reset-to-BIOS, and PS-X EXE loader success/error tests.
 
 ## Bring-Up

@@ -88,7 +88,16 @@ impl Cpu {
         }
 
         let pc = self.pc;
-        let opcode = bus.read32(pc);
+        let opcode = match bus.fetch32(pc) {
+            Ok(opcode) => opcode,
+            Err(_) => {
+                self.in_delay_slot = self.next_is_delay_slot;
+                self.in_delay_slot_branch_taken = self.next_delay_slot_branch_taken;
+                self.in_delay_slot_branch_target = self.next_delay_slot_branch_target;
+                self.raise_exception(Exception::InstructionBusError, pc, None, None);
+                return 2;
+            }
+        };
         let delayed_load = self.load_delay.take();
         self.load_delay_merge = delayed_load;
         self.reg_write_mask = 0;
@@ -145,18 +154,18 @@ impl Cpu {
             0x11 => self.raise_exception(Exception::CoprocessorUnusable, pc, None, Some(1)),
             0x12 => self.execute_cop2(opcode, pc),
             0x13 => self.raise_exception(Exception::CoprocessorUnusable, pc, None, Some(3)),
-            0x20 => self.load8(opcode, bus, true),
+            0x20 => self.load8(opcode, bus, pc, true),
             0x21 => self.load16(opcode, bus, pc, true),
-            0x22 => self.lwl(opcode, bus),
+            0x22 => self.lwl(opcode, bus, pc),
             0x23 => self.load32(opcode, bus, pc),
-            0x24 => self.load8(opcode, bus, false),
+            0x24 => self.load8(opcode, bus, pc, false),
             0x25 => self.load16(opcode, bus, pc, false),
-            0x26 => self.lwr(opcode, bus),
-            0x28 => self.store8(opcode, bus),
+            0x26 => self.lwr(opcode, bus, pc),
+            0x28 => self.store8(opcode, bus, pc),
             0x29 => self.store16(opcode, bus, pc),
-            0x2a => self.swl(opcode, bus),
+            0x2a => self.swl(opcode, bus, pc),
             0x2b => self.store32(opcode, bus, pc),
-            0x2e => self.swr(opcode, bus),
+            0x2e => self.swr(opcode, bus, pc),
             0x30 => self.raise_exception(Exception::CoprocessorUnusable, pc, None, Some(0)),
             0x31 => self.raise_exception(Exception::CoprocessorUnusable, pc, None, Some(1)),
             0x32 => self.lwc2(opcode, bus, pc),
@@ -359,8 +368,10 @@ impl Cpu {
         self.next_delay_slot_branch_target = target;
     }
 
-    fn load8(&mut self, opcode: u32, bus: &mut Bus, signed: bool) {
-        let value = self.data_read8(bus, ea(self, opcode));
+    fn load8(&mut self, opcode: u32, bus: &mut Bus, pc: u32, signed: bool) {
+        let Some(value) = self.data_read8(bus, ea(self, opcode), pc) else {
+            return;
+        };
         let extended = if signed {
             value as i8 as i32 as u32
         } else {
@@ -375,7 +386,9 @@ impl Cpu {
             self.raise_exception(Exception::AddressLoad, pc, Some(addr), None);
             return;
         }
-        let value = self.data_read16(bus, addr);
+        let Some(value) = self.data_read16(bus, addr, pc) else {
+            return;
+        };
         let extended = if signed {
             value as i16 as i32 as u32
         } else {
@@ -390,14 +403,18 @@ impl Cpu {
             self.raise_exception(Exception::AddressLoad, pc, Some(addr), None);
             return;
         }
-        let value = self.data_read32(bus, addr);
+        let Some(value) = self.data_read32(bus, addr, pc) else {
+            return;
+        };
         self.set_load(rt(opcode), value);
     }
 
-    fn lwl(&mut self, opcode: u32, bus: &mut Bus) {
+    fn lwl(&mut self, opcode: u32, bus: &mut Bus, pc: u32) {
         let addr = ea(self, opcode);
         let aligned = addr & !3;
-        let word = self.data_read32(bus, aligned);
+        let Some(word) = self.data_read32(bus, aligned, pc) else {
+            return;
+        };
         let old = self.load_merge_base(rt(opcode));
         let value = match addr & 3 {
             0 => (old & 0x00ff_ffff) | (word << 24),
@@ -408,10 +425,12 @@ impl Cpu {
         self.set_load(rt(opcode), value);
     }
 
-    fn lwr(&mut self, opcode: u32, bus: &mut Bus) {
+    fn lwr(&mut self, opcode: u32, bus: &mut Bus, pc: u32) {
         let addr = ea(self, opcode);
         let aligned = addr & !3;
-        let word = self.data_read32(bus, aligned);
+        let Some(word) = self.data_read32(bus, aligned, pc) else {
+            return;
+        };
         let old = self.load_merge_base(rt(opcode));
         let value = match addr & 3 {
             0 => word,
@@ -422,8 +441,8 @@ impl Cpu {
         self.set_load(rt(opcode), value);
     }
 
-    fn store8(&mut self, opcode: u32, bus: &mut Bus) {
-        self.data_write8(bus, ea(self, opcode), self.reg(rt(opcode)) as u8);
+    fn store8(&mut self, opcode: u32, bus: &mut Bus, pc: u32) {
+        self.data_write8(bus, ea(self, opcode), self.reg(rt(opcode)) as u8, pc);
     }
 
     fn store16(&mut self, opcode: u32, bus: &mut Bus, pc: u32) {
@@ -432,7 +451,7 @@ impl Cpu {
             self.raise_exception(Exception::AddressStore, pc, Some(addr), None);
             return;
         }
-        self.data_write16(bus, addr, self.reg(rt(opcode)) as u16);
+        self.data_write16(bus, addr, self.reg(rt(opcode)) as u16, pc);
     }
 
     fn store32(&mut self, opcode: u32, bus: &mut Bus, pc: u32) {
@@ -441,42 +460,56 @@ impl Cpu {
             self.raise_exception(Exception::AddressStore, pc, Some(addr), None);
             return;
         }
-        self.data_write32(bus, addr, self.reg(rt(opcode)));
+        self.data_write32(bus, addr, self.reg(rt(opcode)), pc);
     }
 
-    fn swl(&mut self, opcode: u32, bus: &mut Bus) {
+    fn swl(&mut self, opcode: u32, bus: &mut Bus, pc: u32) {
         let addr = ea(self, opcode);
         let value = self.reg(rt(opcode));
         match addr & 3 {
-            0 => self.data_write8(bus, addr, (value >> 24) as u8),
+            0 => {
+                self.data_write8(bus, addr, (value >> 24) as u8, pc);
+            }
             1 => {
-                self.data_write8(bus, addr - 1, (value >> 16) as u8);
-                self.data_write8(bus, addr, (value >> 24) as u8);
+                if self.data_write8(bus, addr - 1, (value >> 16) as u8, pc) {
+                    self.data_write8(bus, addr, (value >> 24) as u8, pc);
+                }
             }
             2 => {
-                self.data_write8(bus, addr - 2, (value >> 8) as u8);
-                self.data_write8(bus, addr - 1, (value >> 16) as u8);
-                self.data_write8(bus, addr, (value >> 24) as u8);
+                if self.data_write8(bus, addr - 2, (value >> 8) as u8, pc)
+                    && self.data_write8(bus, addr - 1, (value >> 16) as u8, pc)
+                {
+                    self.data_write8(bus, addr, (value >> 24) as u8, pc);
+                }
             }
-            _ => self.data_write32(bus, addr & !3, value),
+            _ => {
+                self.data_write32(bus, addr & !3, value, pc);
+            }
         }
     }
 
-    fn swr(&mut self, opcode: u32, bus: &mut Bus) {
+    fn swr(&mut self, opcode: u32, bus: &mut Bus, pc: u32) {
         let addr = ea(self, opcode);
         let value = self.reg(rt(opcode));
         match addr & 3 {
-            0 => self.data_write32(bus, addr, value),
+            0 => {
+                self.data_write32(bus, addr, value, pc);
+            }
             1 => {
-                self.data_write8(bus, addr, value as u8);
-                self.data_write8(bus, addr + 1, (value >> 8) as u8);
-                self.data_write8(bus, addr + 2, (value >> 16) as u8);
+                if self.data_write8(bus, addr, value as u8, pc)
+                    && self.data_write8(bus, addr + 1, (value >> 8) as u8, pc)
+                {
+                    self.data_write8(bus, addr + 2, (value >> 16) as u8, pc);
+                }
             }
             2 => {
-                self.data_write8(bus, addr, value as u8);
-                self.data_write8(bus, addr + 1, (value >> 8) as u8);
+                if self.data_write8(bus, addr, value as u8, pc) {
+                    self.data_write8(bus, addr + 1, (value >> 8) as u8, pc);
+                }
             }
-            _ => self.data_write8(bus, addr, value as u8),
+            _ => {
+                self.data_write8(bus, addr, value as u8, pc);
+            }
         }
     }
 
@@ -486,7 +519,9 @@ impl Cpu {
             self.raise_exception(Exception::AddressLoad, pc, Some(addr), None);
             return;
         }
-        let value = self.data_read32(bus, addr);
+        let Some(value) = self.data_read32(bus, addr, pc) else {
+            return;
+        };
         self.gte.write_data(rt(opcode), value);
     }
 
@@ -497,54 +532,78 @@ impl Cpu {
             return;
         }
         let value = self.gte.read_data(rt(opcode));
-        self.data_write32(bus, addr, value);
+        self.data_write32(bus, addr, value, pc);
     }
 
-    fn data_read8(&self, bus: &mut Bus, addr: u32) -> u8 {
+    fn data_read8(&mut self, bus: &mut Bus, addr: u32, pc: u32) -> Option<u8> {
         if self.cop0.cache_isolated() {
-            bus.isolated_cache_read8(addr)
+            Some(bus.isolated_cache_read8(addr))
+        } else if bus.data_bus_error(addr) {
+            self.raise_exception(Exception::DataBusError, pc, None, None);
+            None
         } else {
-            bus.read8(addr)
+            Some(bus.read8(addr))
         }
     }
 
-    fn data_read16(&self, bus: &mut Bus, addr: u32) -> u16 {
+    fn data_read16(&mut self, bus: &mut Bus, addr: u32, pc: u32) -> Option<u16> {
         if self.cop0.cache_isolated() {
-            bus.isolated_cache_read16(addr)
+            Some(bus.isolated_cache_read16(addr))
+        } else if bus.data_bus_error(addr) {
+            self.raise_exception(Exception::DataBusError, pc, None, None);
+            None
         } else {
-            bus.read16(addr)
+            Some(bus.read16(addr))
         }
     }
 
-    fn data_read32(&self, bus: &mut Bus, addr: u32) -> u32 {
+    fn data_read32(&mut self, bus: &mut Bus, addr: u32, pc: u32) -> Option<u32> {
         if self.cop0.cache_isolated() {
-            bus.isolated_cache_read32(addr)
+            Some(bus.isolated_cache_read32(addr))
+        } else if bus.data_bus_error(addr) {
+            self.raise_exception(Exception::DataBusError, pc, None, None);
+            None
         } else {
-            bus.read32(addr)
+            Some(bus.read32(addr))
         }
     }
 
-    fn data_write8(&self, bus: &mut Bus, addr: u32, value: u8) {
+    fn data_write8(&mut self, bus: &mut Bus, addr: u32, value: u8, pc: u32) -> bool {
         if self.cop0.cache_isolated() {
             bus.isolated_cache_write8(addr, value);
+            true
+        } else if bus.data_bus_error(addr) {
+            self.raise_exception(Exception::DataBusError, pc, None, None);
+            false
         } else {
             bus.write8(addr, value);
+            true
         }
     }
 
-    fn data_write16(&self, bus: &mut Bus, addr: u32, value: u16) {
+    fn data_write16(&mut self, bus: &mut Bus, addr: u32, value: u16, pc: u32) -> bool {
         if self.cop0.cache_isolated() {
             bus.isolated_cache_write16(addr, value);
+            true
+        } else if bus.data_bus_error(addr) {
+            self.raise_exception(Exception::DataBusError, pc, None, None);
+            false
         } else {
             bus.write16(addr, value);
+            true
         }
     }
 
-    fn data_write32(&self, bus: &mut Bus, addr: u32, value: u32) {
+    fn data_write32(&mut self, bus: &mut Bus, addr: u32, value: u32, pc: u32) -> bool {
         if self.cop0.cache_isolated() {
             bus.isolated_cache_write32(addr, value);
+            true
+        } else if bus.data_bus_error(addr) {
+            self.raise_exception(Exception::DataBusError, pc, None, None);
+            false
         } else {
             bus.write32(addr, value);
+            true
         }
     }
 
@@ -1293,6 +1352,7 @@ mod tests {
             0x0000_0000,
             &[
                 i(0x30, 0, 1, 0), // lwc0 r1,0(r0)
+                i(0x38, 0, 1, 0), // swc0 r1,0(r0)
             ],
         );
 
@@ -1303,13 +1363,6 @@ mod tests {
         assert_eq!((cpu.cop0.cause() >> 28) & 0x3, 0);
 
         cpu.set_pc(0x8000_0004);
-        write_program(
-            &mut bus,
-            0x0000_0004,
-            &[
-                i(0x38, 0, 1, 0), // swc0 r1,0(r0)
-            ],
-        );
 
         cpu.step(&mut bus);
 
@@ -1358,6 +1411,90 @@ mod tests {
         assert_eq!(cpu.cop0.bad_vaddr(), 0x8000_0002);
         assert_eq!(cpu.cop0.cause() & CAUSE_BD, 0);
         assert_eq!((cpu.cop0.cause() >> 2) & 0x1f, 4);
+    }
+
+    #[test]
+    fn scratchpad_instruction_fetch_raises_instruction_bus_error() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(None);
+        cpu.set_pc(0x9f80_0000);
+
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.pc, 0xbfc0_0180);
+        assert_eq!(cpu.cop0.epc(), 0x9f80_0000);
+        assert_eq!(cpu.cop0.cause() & CAUSE_BD, 0);
+        assert_eq!((cpu.cop0.cause() >> 2) & 0x1f, 6);
+    }
+
+    #[test]
+    fn unmapped_load_raises_data_bus_error() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(None);
+        cpu.set_pc(0x8000_0000);
+        write_program(
+            &mut bus,
+            0x0000_0000,
+            &[
+                i(0x0f, 0, 1, 0x0100), // lui r1,0x0100
+                i(0x23, 1, 2, 0),      // lw r2,0(r1)
+                i(0x09, 0, 3, 1),      // skipped by DBE
+            ],
+        );
+
+        cpu.step(&mut bus);
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.pc, 0xbfc0_0180);
+        assert_eq!(cpu.cop0.epc(), 0x8000_0004);
+        assert_eq!((cpu.cop0.cause() >> 2) & 0x1f, 7);
+        assert_eq!(cpu.regs[2], 0);
+        assert_eq!(cpu.regs[3], 0);
+    }
+
+    #[test]
+    fn kseg0_instruction_fetch_uses_icache_line() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(None);
+        cpu.set_pc(0x8000_0000);
+        write_program(
+            &mut bus,
+            0x0000_0000,
+            &[
+                i(0x09, 0, 1, 1), // addiu r1,r0,1
+                i(0x09, 0, 2, 2), // addiu r2,r0,2
+            ],
+        );
+
+        cpu.step(&mut bus);
+        bus.write32(0x0000_0004, i(0x09, 0, 2, 3));
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.regs[1], 1);
+        assert_eq!(cpu.regs[2], 2);
+        assert_eq!(bus.read32(0x0000_0004), i(0x09, 0, 2, 3));
+    }
+
+    #[test]
+    fn kseg1_instruction_fetch_bypasses_icache() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(None);
+        cpu.set_pc(0xa000_0000);
+        write_program(
+            &mut bus,
+            0x0000_0000,
+            &[
+                i(0x09, 0, 1, 1), // addiu r1,r0,1
+                i(0x09, 0, 2, 2), // addiu r2,r0,2
+            ],
+        );
+
+        cpu.step(&mut bus);
+        bus.write32(0x0000_0004, i(0x09, 0, 2, 3));
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.regs[1], 1);
+        assert_eq!(cpu.regs[2], 3);
     }
 
     #[test]

@@ -13,12 +13,18 @@ pub enum CopyToRamError {
     OutOfRange,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FetchError {
+    BusError,
+}
+
 const CACHE_CONTROL_ADDR: u32 = 0xfffe_0130;
 const DEFAULT_CACHE_CONTROL: u32 = 0x0001_e988;
 const ICACHE_WORDS: usize = 1024;
 const ICACHE_LINES: usize = 256;
 const BCC_TAG: u32 = 1 << 2;
 const BCC_IS1: u32 = 1 << 11;
+const BCC_IBLKSZ_MASK: u32 = 0x0300;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bus {
@@ -86,6 +92,32 @@ impl Bus {
         }
         self.ram[start..end].copy_from_slice(bytes);
         Ok(())
+    }
+
+    pub fn fetch32(&mut self, addr: u32) -> Result<u32, FetchError> {
+        if self.instruction_bus_error(addr) {
+            return Err(FetchError::BusError);
+        }
+
+        if !self.instruction_cache_enabled(addr) {
+            return Ok(self.read32(addr));
+        }
+
+        let phys = Self::physical_addr(addr);
+        let line = icache_line_index(phys);
+        let word = ((phys >> 2) & 3) as usize;
+        let tag = self.icache_tags[line];
+        let tag_addr = phys & 0xffff_f000;
+        let valid_bit = 1u32 << word;
+        if (tag & 0xffff_f000) != tag_addr || (tag & valid_bit) == 0 {
+            self.fill_icache_line(addr);
+        }
+
+        Ok(self.icache_words[icache_word_index(phys)])
+    }
+
+    pub fn data_bus_error(&self, addr: u32) -> bool {
+        !is_data_accessible_phys(Self::physical_addr(addr))
     }
 
     pub fn read8(&mut self, addr: u32) -> u8 {
@@ -268,6 +300,41 @@ impl Bus {
         } else {
             self.icache_words[icache_word_index(addr)] = value;
         }
+    }
+
+    fn instruction_cache_enabled(&self, addr: u32) -> bool {
+        (self.cache_control & BCC_IS1) != 0
+            && matches!(addr, 0x0000_0000..=0x1fff_ffff | 0x8000_0000..=0x9fff_ffff)
+    }
+
+    fn instruction_bus_error(&self, addr: u32) -> bool {
+        matches!(addr, 0xc000_0000..=0xffff_ffff)
+            || !is_instruction_accessible_phys(Self::physical_addr(addr))
+    }
+
+    fn fill_icache_line(&mut self, addr: u32) {
+        let phys = Self::physical_addr(addr);
+        let line = icache_line_index(phys);
+        let word = ((phys >> 2) & 3) as usize;
+        let tag_addr = phys & 0xffff_f000;
+        let old_valid = if (self.icache_tags[line] & 0xffff_f000) == tag_addr {
+            self.icache_tags[line] & 0x0f
+        } else {
+            0
+        };
+        let last_word = if word == 0 && (self.cache_control & BCC_IBLKSZ_MASK) == 0 {
+            1
+        } else {
+            3
+        };
+        let line_base_addr = addr & !0x0f;
+        let mut valid = old_valid;
+        for slot in word..=last_word {
+            let fetch_addr = line_base_addr.wrapping_add((slot as u32) * 4);
+            self.icache_words[icache_word_index(fetch_addr)] = self.read32(fetch_addr);
+            valid |= 1 << slot;
+        }
+        self.icache_tags[line] = tag_addr | valid;
     }
 
     fn peek8(&self, addr: u32) -> u8 {
@@ -518,6 +585,29 @@ fn dma_word_count(bcr: u32, sync_mode: u32) -> u32 {
         }
         _ => 0,
     }
+}
+
+fn is_instruction_accessible_phys(phys: u32) -> bool {
+    matches!(
+        phys,
+        0x0000_0000..=0x007f_ffff
+            | 0x1f00_0000..=0x1f7f_ffff
+            | 0x1fa0_0000..=0x1fbf_ffff
+            | 0x1fc0_0000..=0x1fc7_ffff
+    )
+}
+
+fn is_data_accessible_phys(phys: u32) -> bool {
+    matches!(
+        phys,
+        0x0000_0000..=0x007f_ffff
+            | 0x1f00_0000..=0x1f7f_ffff
+            | 0x1f80_0000..=0x1f80_03ff
+            | 0x1f80_1000..=0x1f80_3fff
+            | 0x1fa0_0000..=0x1fbf_ffff
+            | 0x1fc0_0000..=0x1fc7_ffff
+            | CACHE_CONTROL_ADDR..=0xfffe_0133
+    )
 }
 
 fn icache_word_index(addr: u32) -> usize {

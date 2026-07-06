@@ -17,16 +17,25 @@
 
 - DMA2 linked-list GP0 packet transfer.
 - DMA2 sync1 VRAM upload with MADR/BCR completion state.
+- DMA2 sync1 VRAM readback through GPUREAD into main RAM.
 - DMA6 OTC ordering-table clear and IRQ3 request.
 - DICR masked completion flags, bus-error master flag, and DMA6 CHCR restrictions.
 - DMA pending-channel priority and sync0 force-start behavior.
 - Timer target one-shot/repeat, pulse/toggle, timer2 divide-by-8, HBlank clock, and sync pause tests.
 
+## Completed GPU Coverage
+
+- Direct CPU-to-VRAM and VRAM-to-CPU pixel round trip.
+- VRAM-to-VRAM copies with mask-bit protection.
+- Draw-area clipping and draw offset on flat rectangles.
+- Flat triangle rasterization.
+- 4bpp textured rectangle sampling through a CLUT.
+
 ## Bring-Up
 
 - Run a real BIOS for a fixed step count with `--trace` and compare CPU traces against a known-good emulator.
 - Run PS-X EXE homebrew that writes known values to RAM/MMIO once a MIPS PS-EXE toolchain or prebuilt artifact is available.
-- Add screenshot capture once GPU display output is wired to the frontend.
+- Add screenshot capture once a real BIOS/demo produces stable visible frames.
 
 ## Compatibility
 

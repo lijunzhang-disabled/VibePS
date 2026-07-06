@@ -8,7 +8,7 @@
 | Phase 1: CPU + memory bus | Done | R3000A integer core, COP0, load/branch delays, memory map, bus faults, tests |
 | Phase 2: BIOS boot | Done | BIOS boot trace CLI, BCC/cache isolation, i-cache fetch model, PS-X EXE loader |
 | Phase 3: DMA + timers + IRQs | Done | DMA modes/channels, GPU linked lists, OTC, DICR/DPCR IRQs, root-counter modes |
-| Phase 4: GPU | Pending | GP0/GP1 parser, VRAM transfers, polygons, rectangles, display output |
+| Phase 4: GPU | Done | GP0/GP1 parser, VRAM transfers, polygons, rectangles, display output |
 | Phase 5: CD-ROM | Pending | Command/status machine, sector reads, ISO/BIN/CUE, XA timing |
 | Phase 6: GTE | Pending | COP2 register model and matrix/vector commands |
 | Phase 7: Controllers + memory cards | Pending | JOY serial protocol, digital/analog pads, card EEPROM protocol |
@@ -53,11 +53,11 @@
 
 ## Phase 4 Details: GPU
 
-1. Parse GP0 packets and GP1 display-control commands.
-2. Implement VRAM CPU-to-GPU and GPU-to-CPU transfers.
-3. Implement rectangle and monochrome polygon rendering.
-4. Add texture, CLUT, Gouraud, semi-transparency, dithering, masking, and draw-area rules.
-5. Add an SDL frontend once the display path shows BIOS/demo output.
+1. Parse GP0 packets and GP1 display-control commands. Done with a shared direct-CPU/DMA packet collector, GP1 display state, GPUSTAT status bits, and internal register reads.
+2. Implement VRAM CPU-to-GPU and GPU-to-CPU transfers. Done for CPU/DMA upload, readback through GPUREAD, and VRAM-to-VRAM copies with wrapping and mask behavior.
+3. Implement rectangle and monochrome polygon rendering. Done for flat rectangles, lines, triangles, and quads.
+4. Add texture, CLUT, Gouraud, semi-transparency, dithering, masking, and draw-area rules. Done as a deterministic software-rendering baseline for 4bpp/8bpp/15bpp texture lookup, CLUTs, modulation/raw texture mode, Gouraud interpolation, blend modes, dithered 15-bit conversion, draw offset/area clipping, and mask-bit rules.
+5. Add an SDL frontend once the display path shows BIOS/demo output. Deferred until a real BIOS/demo reaches stable visible frames; the core now exposes `display_frame()` and display sizing for that frontend.
 
 ## Phase 5+ Compatibility
 

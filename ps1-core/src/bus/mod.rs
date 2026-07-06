@@ -797,6 +797,27 @@ mod tests {
     }
 
     #[test]
+    fn dma2_sync1_vram_readback_writes_ram() {
+        let mut bus = Bus::new(None);
+        bus.write32(0x1f80_1810, 0xa000_0000); // cpu-to-vram
+        bus.write32(0x1f80_1810, 0x0000_0000); // xy
+        bus.write32(0x1f80_1810, 0x0001_0002); // width=2,height=1
+        bus.write32(0x1f80_1810, 0x2222_1111);
+        bus.write32(0x1f80_1810, 0xc000_0000); // vram-to-cpu
+        bus.write32(0x1f80_1810, 0x0000_0000); // xy
+        bus.write32(0x1f80_1810, 0x0001_0002); // width=2,height=1
+        bus.write32(0x1f80_10f0, 1 << 11);
+        bus.write32(0x1f80_10a0, 0x0000_0200);
+        bus.write32(0x1f80_10a4, (1 << 16) | 1);
+
+        bus.write32(0x1f80_10a8, 0x0100_0200);
+
+        assert_eq!(bus.read32(0x0000_0200), 0x2222_1111);
+        assert_eq!(bus.read32(0x1f80_10a0), 0x0000_0204);
+        assert_eq!(bus.read32(0x1f80_10a4), 0x0000_0001);
+    }
+
+    #[test]
     fn dma6_otc_clears_ordering_table_and_requests_irq_when_enabled() {
         let mut bus = Bus::new(None);
         bus.write32(0x1f80_10f0, 1 << 27);

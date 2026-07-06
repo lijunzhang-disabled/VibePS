@@ -13,13 +13,15 @@ This repository currently contains the first implementation slice:
   KUSEG/KSEG0 instruction fetches, and uncached KSEG1 fetches
 - Interrupt controller, root-counter timer modes, DMA channel modes/IRQs,
   GPU linked-list DMA, OTC, and GPU/SPU/CD scaffolding
+- GPU GP0/GP1 command parsing, VRAM upload/readback/copy, flat and textured
+  primitive rendering, display register state, and BGR555 frame extraction
 - Minimal PS-X EXE loader and CLI runner with BIOS boot trace output
 - Focused unit tests for CPU and memory behavior
 
 It is not yet a playable emulator. Phase 1 CPU/bus, Phase 2 BIOS boot bring-up,
-and Phase 3 DMA/timer/IRQ behavior are complete enough to move on. The next
-milestones are GPU command rendering, CD-ROM sector delivery, GTE, SPU,
-controllers, memory cards, and an SDL frontend.
+Phase 3 DMA/timer/IRQ behavior, and the Phase 4 core GPU path are complete
+enough to move on. The next milestones are CD-ROM sector delivery, GTE, SPU,
+controllers, memory cards, GPU timing accuracy, and an SDL frontend.
 
 ## Run
 
@@ -31,10 +33,11 @@ cargo run -p ps1-frontend -- --bios path/to/SCPH1001.BIN --steps 100000 --trace 
 cargo run -p ps1-frontend -- --bios path/to/SCPH1001.BIN --exe path/to/demo.exe --steps 100000
 ```
 
-The frontend is currently a bring-up harness. It prints final CPU state rather
-than opening a video/audio window. `--trace` writes one pre-instruction CPU
-state line per executed instruction so BIOS boot can be diffed against a
-known-good emulator.
+The frontend is currently a bring-up harness. It prints final CPU/video/audio
+state rather than opening a video/audio window. `--trace` writes one
+pre-instruction CPU state line per executed instruction so BIOS boot can be
+diffed against a known-good emulator. The core exposes BGR555 frames through the
+GPU display path for the later SDL/video frontend.
 
 ## Project Docs
 

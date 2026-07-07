@@ -621,6 +621,12 @@ impl Gpu {
                 if w0 < 0 || w1 < 0 || w2 < 0 {
                     continue;
                 }
+                if (w0 == 0 && !edge_is_top_left(vertices[1], vertices[2], sign))
+                    || (w1 == 0 && !edge_is_top_left(vertices[2], vertices[0], sign))
+                    || (w2 == 0 && !edge_is_top_left(vertices[0], vertices[1], sign))
+                {
+                    continue;
+                }
 
                 let shade = if style.gouraud {
                     interpolate_rgb24(vertices, [w0, w1, w2], area_abs)
@@ -995,7 +1001,6 @@ impl Gpu {
     }
 
     fn reset(&mut self) {
-        self.vram.fill(0);
         self.status = 0x1480_2000;
         self.read_response = 0;
         self.packet = Gp0Packet::Idle;
@@ -1112,6 +1117,11 @@ fn edge(a: Vertex, b: Vertex, x: i32, y: i32) -> i64 {
     ((b.x - a.x) as i64) * ((y - a.y) as i64) - ((b.y - a.y) as i64) * ((x - a.x) as i64)
 }
 
+fn edge_is_top_left(a: Vertex, b: Vertex, sign: i64) -> bool {
+    let (a, b) = if sign >= 0 { (a, b) } else { (b, a) };
+    (a.y == b.y && a.x < b.x) || a.y > b.y
+}
+
 fn max_vertex_delta(values: impl Iterator<Item = i32>) -> i32 {
     let mut min = i32::MAX;
     let mut max = i32::MIN;
@@ -1201,6 +1211,25 @@ fn blend555(back: u16, front: u16, mode: u16) -> u16 {
 mod tests {
     use super::Gpu;
 
+    // Selected hardware expectations adapted from PCSX-Redux GPU raster tests
+    // (MIT License, copyright 2026 PCSX-Redux authors):
+    // https://github.com/grumpycoders/pcsx-redux/tree/main/src/mips/psyq/psxgpu/gpu_raster
+    const RASTER_SENTINEL: u16 = 0xdead;
+    const MASK_SENTINEL: u16 = 0x5555;
+    const VRAM_RED: u16 = 0x001f;
+    const VRAM_GREEN: u16 = 0x03e0;
+    const CMD_RED: u32 = 0x0000_00f8;
+    const CMD_GREEN: u32 = 0x0000_f800;
+    const CMD_BLUE: u32 = 0xf8_0000;
+    const CMD_NEUTRAL: u32 = 0x0080_8080;
+    const CLUT4_X: u16 = 512;
+    const CLUT4_Y: u16 = 256;
+    const CLUT8_X: u16 = 512;
+    const CLUT8_Y: u16 = 257;
+    const TEX4_TX: u16 = 8;
+    const TEX8_TX: u16 = 9;
+    const TEX15_TX: u16 = 10;
+
     #[test]
     fn cpu_to_vram_and_vram_to_cpu_round_trip_pixels() {
         let mut gpu = Gpu::new();
@@ -1287,6 +1316,373 @@ mod tests {
 
         assert_eq!(gpu.vram()[0], 0x001f);
         assert_eq!(gpu.vram()[1], 0x03e0);
+    }
+
+    #[test]
+    fn pcsx_redux_phase1_triangle_uses_hardware_edge_inclusion() {
+        let mut gpu = Gpu::new();
+        raster_reset(&mut gpu);
+        fill_rect_upload(&mut gpu, 0, 0, 8, 8, RASTER_SENTINEL);
+
+        flat_tri(&mut gpu, CMD_RED, (0, 0), (4, 0), (0, 4));
+
+        assert_eq!(pixel(&gpu, 0, 0), VRAM_RED);
+        assert_eq!(pixel(&gpu, 3, 0), VRAM_RED);
+        assert_eq!(pixel(&gpu, 2, 1), VRAM_RED);
+        assert_eq!(pixel(&gpu, 0, 3), VRAM_RED);
+        assert_eq!(pixel(&gpu, 4, 0), RASTER_SENTINEL);
+        assert_eq!(pixel(&gpu, 3, 1), RASTER_SENTINEL);
+        assert_eq!(pixel(&gpu, 2, 2), RASTER_SENTINEL);
+        assert_eq!(pixel(&gpu, 1, 3), RASTER_SENTINEL);
+        assert_eq!(pixel(&gpu, 0, 4), RASTER_SENTINEL);
+
+        raster_reset(&mut gpu);
+        fill_rect_upload(&mut gpu, 0, 0, 4, 4, RASTER_SENTINEL);
+        flat_tri(&mut gpu, CMD_RED, (0, 0), (1, 0), (0, 1));
+
+        assert_eq!(pixel(&gpu, 0, 0), VRAM_RED);
+        assert_eq!(pixel(&gpu, 1, 0), RASTER_SENTINEL);
+        assert_eq!(pixel(&gpu, 0, 1), RASTER_SENTINEL);
+        assert_eq!(pixel(&gpu, 1, 1), RASTER_SENTINEL);
+    }
+
+    #[test]
+    fn pcsx_redux_phase1_rectangles_use_expected_extents_and_clipping() {
+        let mut gpu = Gpu::new();
+        raster_reset(&mut gpu);
+        fill_rect_upload(&mut gpu, 8, 8, 8, 8, RASTER_SENTINEL);
+
+        flat_rect(&mut gpu, CMD_GREEN, 10, 10, 4, 4);
+
+        assert_eq!(pixel(&gpu, 10, 10), VRAM_GREEN);
+        assert_eq!(pixel(&gpu, 13, 13), VRAM_GREEN);
+        assert_eq!(pixel(&gpu, 14, 10), RASTER_SENTINEL);
+        assert_eq!(pixel(&gpu, 10, 14), RASTER_SENTINEL);
+        assert_eq!(pixel(&gpu, 9, 10), RASTER_SENTINEL);
+
+        raster_reset(&mut gpu);
+        fill_rect_upload(&mut gpu, 0, 0, 16, 16, RASTER_SENTINEL);
+        set_draw_area(&mut gpu, 4, 4, 16, 16);
+        flat_rect(&mut gpu, CMD_GREEN, 2, 2, 6, 6);
+
+        assert_eq!(pixel(&gpu, 4, 4), VRAM_GREEN);
+        assert_eq!(pixel(&gpu, 7, 7), VRAM_GREEN);
+        assert_eq!(pixel(&gpu, 2, 2), RASTER_SENTINEL);
+        assert_eq!(pixel(&gpu, 3, 3), RASTER_SENTINEL);
+        assert_eq!(pixel(&gpu, 8, 8), RASTER_SENTINEL);
+    }
+
+    #[test]
+    fn pcsx_redux_phase2_lines_match_selected_bresenham_probes() {
+        let mut gpu = Gpu::new();
+        raster_reset(&mut gpu);
+        fill_rect_upload(&mut gpu, 0, 0, 16, 16, RASTER_SENTINEL);
+
+        flat_line(&mut gpu, CMD_GREEN, (5, 10), (10, 10));
+
+        assert_eq!(pixel(&gpu, 4, 10), RASTER_SENTINEL);
+        assert_eq!(pixel(&gpu, 5, 10), VRAM_GREEN);
+        assert_eq!(pixel(&gpu, 7, 10), VRAM_GREEN);
+        assert_eq!(pixel(&gpu, 10, 10), VRAM_GREEN);
+        assert_eq!(pixel(&gpu, 11, 10), RASTER_SENTINEL);
+        assert_eq!(pixel(&gpu, 5, 11), RASTER_SENTINEL);
+
+        raster_reset(&mut gpu);
+        fill_rect_upload(&mut gpu, 0, 0, 16, 16, RASTER_SENTINEL);
+        flat_line(&mut gpu, CMD_GREEN, (0, 0), (10, 3));
+
+        assert_eq!(pixel(&gpu, 0, 0), VRAM_GREEN);
+        assert_eq!(pixel(&gpu, 5, 2), VRAM_GREEN);
+        assert_eq!(pixel(&gpu, 10, 3), VRAM_GREEN);
+        assert_eq!(pixel(&gpu, 2, 0), RASTER_SENTINEL);
+    }
+
+    #[test]
+    fn pcsx_redux_phase2_mask_bits_apply_to_drawn_pixels() {
+        let mut gpu = Gpu::new();
+        raster_reset(&mut gpu);
+        fill_rect_upload(&mut gpu, 0, 0, 16, 16, MASK_SENTINEL);
+
+        gpu.write_gp0(0xe600_0001);
+        flat_tri(&mut gpu, CMD_RED, (0, 0), (4, 0), (0, 4));
+
+        assert_eq!(pixel(&gpu, 0, 0), 0x8000 | VRAM_RED);
+        assert_eq!(pixel(&gpu, 2, 1), 0x8000 | VRAM_RED);
+        assert_eq!(pixel(&gpu, 4, 0), MASK_SENTINEL);
+
+        raster_reset(&mut gpu);
+        fill_rect_upload(&mut gpu, 0, 0, 16, 16, MASK_SENTINEL);
+        gpu.write_gp0(0xe600_0001);
+        flat_tri(&mut gpu, CMD_RED, (0, 0), (4, 0), (0, 4));
+        gpu.write_gp0(0xe600_0002);
+        flat_tri(&mut gpu, CMD_GREEN, (4, 0), (8, 0), (4, 4));
+
+        assert_eq!(pixel(&gpu, 1, 0), 0x8000 | VRAM_RED);
+        assert_eq!(pixel(&gpu, 5, 0), VRAM_GREEN);
+    }
+
+    #[test]
+    fn pcsx_redux_phase4_textured_triangles_sample_clut_and_direct_texels() {
+        let mut gpu = Gpu::new();
+        prepare_texture_raster(&mut gpu);
+        set_draw_mode_texpage(&mut gpu, TEX4_TX, 0);
+        textured_tri(
+            &mut gpu,
+            CMD_NEUTRAL,
+            clut_field(CLUT4_X, CLUT4_Y),
+            texpage_field(TEX4_TX, 0),
+            [(0, 0, 0, 0), (16, 0, 16, 0), (0, 8, 0, 8)],
+        );
+
+        assert_eq!(pixel(&gpu, 0, 0), expected_clut4_color(0));
+        assert_eq!(pixel(&gpu, 3, 0), expected_clut4_color(3));
+        assert_eq!(pixel(&gpu, 15, 0), expected_clut4_color(15));
+        assert_eq!(pixel(&gpu, 16, 0), RASTER_SENTINEL);
+        assert_eq!(pixel(&gpu, 0, 8), RASTER_SENTINEL);
+
+        prepare_texture_raster(&mut gpu);
+        set_draw_mode_texpage(&mut gpu, TEX8_TX, 1);
+        textured_tri(
+            &mut gpu,
+            CMD_NEUTRAL,
+            clut_field(CLUT8_X, CLUT8_Y),
+            texpage_field(TEX8_TX, 1),
+            [(0, 0, 0, 0), (32, 0, 32, 0), (0, 8, 0, 8)],
+        );
+
+        assert_eq!(pixel(&gpu, 0, 0), expected_clut8_color(0));
+        assert_eq!(pixel(&gpu, 31, 0), expected_clut8_color(31));
+        assert_eq!(pixel(&gpu, 32, 0), RASTER_SENTINEL);
+
+        prepare_texture_raster(&mut gpu);
+        set_draw_mode_texpage(&mut gpu, TEX15_TX, 2);
+        textured_tri(
+            &mut gpu,
+            CMD_NEUTRAL,
+            0,
+            texpage_field(TEX15_TX, 2),
+            [(0, 0, 0, 0), (16, 0, 16, 0), (0, 8, 0, 8)],
+        );
+
+        assert_eq!(pixel(&gpu, 0, 0), RASTER_SENTINEL);
+        assert_eq!(pixel(&gpu, 5, 0), expected_tex15_color(5, 0));
+        assert_eq!(pixel(&gpu, 0, 8), RASTER_SENTINEL);
+    }
+
+    #[test]
+    fn pcsx_redux_phase7_gouraud_triangle_matches_selected_probes() {
+        let mut gpu = Gpu::new();
+        raster_reset(&mut gpu);
+        fill_rect_upload(&mut gpu, 0, 0, 16, 16, RASTER_SENTINEL);
+
+        gouraud_tri(
+            &mut gpu,
+            (CMD_RED, 0, 0),
+            (CMD_GREEN, 7, 0),
+            (CMD_BLUE, 0, 7),
+        );
+
+        assert_eq!(pixel(&gpu, 0, 0), 0x001f);
+        assert_eq!(pixel(&gpu, 4, 0), 0x022d);
+        assert_eq!(pixel(&gpu, 0, 4), 0x440d);
+        assert_eq!(pixel(&gpu, 1, 1), 0x1096);
+        assert_eq!(pixel(&gpu, 3, 3), 0x35a4);
+    }
+
+    #[test]
+    fn pcsx_redux_phase11_dither_matrix_is_screen_space_anchored() {
+        let mut gpu = Gpu::new();
+        raster_reset(&mut gpu);
+        fill_rect_upload(&mut gpu, 0, 0, 64, 64, RASTER_SENTINEL);
+        gpu.write_gp0(0xe100_0600);
+
+        gouraud_tri(
+            &mut gpu,
+            (CMD_NEUTRAL, 0, 0),
+            (CMD_NEUTRAL, 31, 0),
+            (CMD_NEUTRAL, 0, 31),
+        );
+
+        let expected = [
+            [0x3def, 0x4210, 0x3def, 0x4210],
+            [0x4210, 0x3def, 0x4210, 0x3def],
+            [0x3def, 0x4210, 0x3def, 0x4210],
+            [0x4210, 0x3def, 0x4210, 0x3def],
+        ];
+        for (dy, row) in expected.into_iter().enumerate() {
+            for (dx, value) in row.into_iter().enumerate() {
+                assert_eq!(pixel(&gpu, 8 + dx, 8 + dy), value);
+            }
+        }
+    }
+
+    fn raster_reset(gpu: &mut Gpu) {
+        gpu.write_gp1(0x0000_0000);
+        gpu.write_gp1(0x0400_0001);
+        set_draw_area(
+            gpu,
+            0,
+            0,
+            crate::GPU_VRAM_WIDTH as u16,
+            crate::GPU_VRAM_HEIGHT as u16,
+        );
+        gpu.write_gp0(0xe200_0000);
+        gpu.write_gp0(0xe500_0000);
+        gpu.write_gp0(0xe600_0000);
+        gpu.write_gp0(0xe100_0400);
+    }
+
+    fn set_draw_area(gpu: &mut Gpu, x1: u16, y1: u16, x2_exclusive: u16, y2_exclusive: u16) {
+        let x2 = x2_exclusive.saturating_sub(1).min(1023);
+        let y2 = y2_exclusive.saturating_sub(1).min(511);
+        gpu.write_gp0(0xe300_0000 | (x1 as u32) | ((y1 as u32) << 10));
+        gpu.write_gp0(0xe400_0000 | (x2 as u32) | ((y2 as u32) << 10));
+    }
+
+    fn prepare_texture_raster(gpu: &mut Gpu) {
+        raster_reset(gpu);
+        fill_rect_upload(gpu, 0, 0, 40, 16, RASTER_SENTINEL);
+        upload_texture_fixtures(gpu);
+    }
+
+    fn set_draw_mode_texpage(gpu: &mut Gpu, tx: u16, depth: u16) {
+        gpu.write_gp0(0xe100_0400 | texpage_field(tx, depth) as u32);
+    }
+
+    fn flat_tri(gpu: &mut Gpu, color: u32, v0: (i16, i16), v1: (i16, i16), v2: (i16, i16)) {
+        gpu.write_gp0(0x2000_0000 | color);
+        gpu.write_gp0(pack_xy(v0.0, v0.1));
+        gpu.write_gp0(pack_xy(v1.0, v1.1));
+        gpu.write_gp0(pack_xy(v2.0, v2.1));
+    }
+
+    fn gouraud_tri(gpu: &mut Gpu, v0: (u32, i16, i16), v1: (u32, i16, i16), v2: (u32, i16, i16)) {
+        gpu.write_gp0(0x3000_0000 | v0.0);
+        gpu.write_gp0(pack_xy(v0.1, v0.2));
+        gpu.write_gp0(v1.0);
+        gpu.write_gp0(pack_xy(v1.1, v1.2));
+        gpu.write_gp0(v2.0);
+        gpu.write_gp0(pack_xy(v2.1, v2.2));
+    }
+
+    fn textured_tri(
+        gpu: &mut Gpu,
+        color: u32,
+        clut: u16,
+        texpage: u16,
+        vertices: [(i16, i16, u8, u8); 3],
+    ) {
+        gpu.write_gp0(0x2400_0000 | color);
+        gpu.write_gp0(pack_xy(vertices[0].0, vertices[0].1));
+        gpu.write_gp0(pack_uv(vertices[0].2, vertices[0].3, clut));
+        gpu.write_gp0(pack_xy(vertices[1].0, vertices[1].1));
+        gpu.write_gp0(pack_uv(vertices[1].2, vertices[1].3, texpage));
+        gpu.write_gp0(pack_xy(vertices[2].0, vertices[2].1));
+        gpu.write_gp0(pack_uv(vertices[2].2, vertices[2].3, 0));
+    }
+
+    fn flat_rect(gpu: &mut Gpu, color: u32, x: i16, y: i16, width: u16, height: u16) {
+        gpu.write_gp0(0x6000_0000 | color);
+        gpu.write_gp0(pack_xy(x, y));
+        gpu.write_gp0((width as u32) | ((height as u32) << 16));
+    }
+
+    fn flat_line(gpu: &mut Gpu, color: u32, v0: (i16, i16), v1: (i16, i16)) {
+        gpu.write_gp0(0x4000_0000 | color);
+        gpu.write_gp0(pack_xy(v0.0, v0.1));
+        gpu.write_gp0(pack_xy(v1.0, v1.1));
+    }
+
+    fn fill_rect_upload(gpu: &mut Gpu, x: u16, y: u16, width: u16, height: u16, value: u16) {
+        gpu.write_gp0(0xa000_0000);
+        gpu.write_gp0((x as u32) | ((y as u32) << 16));
+        gpu.write_gp0((width as u32) | ((height as u32) << 16));
+        let word = value as u32 | ((value as u32) << 16);
+        for _ in 0..((width as usize * height as usize).div_ceil(2)) {
+            gpu.write_gp0(word);
+        }
+    }
+
+    fn upload_pixels(gpu: &mut Gpu, x: u16, y: u16, width: u16, height: u16, pixels: &[u16]) {
+        assert_eq!(pixels.len(), width as usize * height as usize);
+        gpu.write_gp0(0xa000_0000);
+        gpu.write_gp0((x as u32) | ((y as u32) << 16));
+        gpu.write_gp0((width as u32) | ((height as u32) << 16));
+        for chunk in pixels.chunks(2) {
+            let lo = chunk[0] as u32;
+            let hi = chunk.get(1).copied().unwrap_or(0) as u32;
+            gpu.write_gp0(lo | (hi << 16));
+        }
+    }
+
+    fn upload_texture_fixtures(gpu: &mut Gpu) {
+        let clut4: Vec<u16> = (0..16).map(|i| vram555(i, 31 - i, 0)).collect();
+        upload_pixels(gpu, CLUT4_X, CLUT4_Y, 16, 1, &clut4);
+
+        let clut8: Vec<u16> = (0..256)
+            .map(|i| vram555(i & 31, (255 - i) & 31, i >> 5))
+            .collect();
+        upload_pixels(gpu, CLUT8_X, CLUT8_Y, 256, 1, &clut8);
+
+        let mut tex4 = Vec::with_capacity(4 * 16);
+        for _ in 0..16 {
+            tex4.extend([0x3210, 0x7654, 0xba98, 0xfedc]);
+        }
+        upload_pixels(gpu, TEX4_TX * 64, 0, 4, 16, &tex4);
+
+        let mut tex8 = Vec::with_capacity(32 * 16);
+        for _ in 0..16 {
+            for pair in 0..32 {
+                let lo = pair * 2;
+                let hi = lo + 1;
+                tex8.push((lo | (hi << 8)) as u16);
+            }
+        }
+        upload_pixels(gpu, TEX8_TX * 64, 0, 32, 16, &tex8);
+
+        let mut tex15 = Vec::with_capacity(64 * 16);
+        for v in 0..16 {
+            for u in 0..64 {
+                tex15.push(expected_tex15_color(u, v));
+            }
+        }
+        upload_pixels(gpu, TEX15_TX * 64, 0, 64, 16, &tex15);
+    }
+
+    fn pixel(gpu: &Gpu, x: usize, y: usize) -> u16 {
+        gpu.vram()[y * GPU_WIDTH_FOR_TEST + x]
+    }
+
+    fn pack_xy(x: i16, y: i16) -> u32 {
+        ((x as i32 as u32) & 0x07ff) | (((y as i32 as u32) & 0x07ff) << 16)
+    }
+
+    fn pack_uv(u: u8, v: u8, upper: u16) -> u32 {
+        (u as u32) | ((v as u32) << 8) | ((upper as u32) << 16)
+    }
+
+    fn clut_field(x: u16, y: u16) -> u16 {
+        ((x & 0x03f0) >> 4) | ((y & 0x01ff) << 6)
+    }
+
+    fn texpage_field(tx: u16, depth: u16) -> u16 {
+        tx | (depth << 7)
+    }
+
+    fn vram555(r: u16, g: u16, b: u16) -> u16 {
+        (r & 0x1f) | ((g & 0x1f) << 5) | ((b & 0x1f) << 10)
+    }
+
+    fn expected_clut4_color(u: u16) -> u16 {
+        vram555(u & 15, 31 - (u & 15), 0)
+    }
+
+    fn expected_clut8_color(u: u16) -> u16 {
+        vram555(u & 31, (255 - u) & 31, u >> 5)
+    }
+
+    fn expected_tex15_color(u: u16, v: u16) -> u16 {
+        vram555(u & 31, v & 31, (u + v) & 31)
     }
 
     const GPU_WIDTH_FOR_TEST: usize = crate::GPU_VRAM_WIDTH;

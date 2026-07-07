@@ -31,6 +31,7 @@ cargo test
 cargo run -p ps1-frontend -- --bios path/to/SCPH1001.BIN --steps 100000
 cargo run -p ps1-frontend -- --bios path/to/SCPH1001.BIN --steps 100000 --trace debug/boot.trace
 cargo run -p ps1-frontend -- --bios path/to/SCPH1001.BIN --exe path/to/demo.exe --steps 100000
+cargo run -p ps1-frontend -- --exe path/to/test.ps-exe --test-mailbox 0x80010100=1 --steps 100000
 ```
 
 The frontend is currently a bring-up harness. It prints final CPU/video/audio
@@ -38,6 +39,12 @@ state rather than opening a video/audio window. `--trace` writes one
 pre-instruction CPU state line per executed instruction so BIOS boot can be
 diffed against a known-good emulator. The core exposes BGR555 frames through the
 GPU display path for the later SDL/video frontend.
+
+`ps1-core::test_runner` provides reusable PS-EXE test execution infrastructure.
+The frontend exposes it through `--test`, `--test-mailbox ADDR=PASS`,
+`--test-stop-pc ADDR`, `--test-pass-reg REG=VALUE`, and `--test-exit-reg REG`.
+A mailbox run stops when the 32-bit mailbox becomes nonzero and passes only when
+it equals the requested pass value.
 
 ## Project Docs
 

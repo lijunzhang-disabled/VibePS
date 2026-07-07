@@ -9,6 +9,7 @@ pub mod gpu;
 pub mod interrupt;
 pub mod mdec;
 pub mod scheduler;
+pub mod test_runner;
 pub mod timer;
 
 use bus::Bus;

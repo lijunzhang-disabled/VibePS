@@ -694,6 +694,7 @@ fn icache_line_index(addr: u32) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{Bus, BCC_IS1, BCC_TAG, DEFAULT_CACHE_CONTROL};
+    use crate::cdrom::CdromSectorSize;
     use crate::interrupt::IRQ_DMA;
 
     #[test]
@@ -818,6 +819,28 @@ mod tests {
     }
 
     #[test]
+    fn dma3_reads_cdrom_sector_data_into_ram() {
+        let mut bus = Bus::new(None);
+        bus.cdrom
+            .load_disc_image(cooked_disc(1), CdromSectorSize::Cooked2048)
+            .unwrap();
+        cdrom_command(&mut bus, 0x02, &[0x00, 0x02, 0x00]);
+        cdrom_ack(&mut bus);
+        cdrom_command(&mut bus, 0x06, &[]);
+        cdrom_ack(&mut bus);
+
+        bus.write32(0x1f80_10f0, 1 << 15);
+        bus.write32(0x1f80_10b0, 0x0000_0300);
+        bus.write32(0x1f80_10b4, (1 << 16) | 512);
+        bus.write32(0x1f80_10b8, 0x0100_0200);
+
+        assert_eq!(bus.read32(0x0000_0300), 0x0302_0100);
+        assert_eq!(bus.read32(0x0000_0304), 0x0706_0504);
+        assert_eq!(bus.read32(0x1f80_10b0), 0x0000_0b00);
+        assert_eq!(bus.read32(0x1f80_10b4), 512);
+    }
+
+    #[test]
     fn dma6_otc_clears_ordering_table_and_requests_irq_when_enabled() {
         let mut bus = Bus::new(None);
         bus.write32(0x1f80_10f0, 1 << 27);
@@ -833,5 +856,29 @@ mod tests {
         assert_eq!(bus.read32(0x0000_0100), 0x00ff_ffff);
         assert_ne!(bus.read32(0x1f80_10f4) & ((1 << 31) | (1 << 30)), 0);
         assert_ne!(bus.irq.status() & IRQ_DMA, 0);
+    }
+
+    fn cdrom_command(bus: &mut Bus, command: u8, params: &[u8]) {
+        bus.write8(0x1f80_1800, 0);
+        for param in params {
+            bus.write8(0x1f80_1802, *param);
+        }
+        bus.write8(0x1f80_1801, command);
+    }
+
+    fn cdrom_ack(bus: &mut Bus) {
+        bus.write8(0x1f80_1800, 1);
+        bus.write8(0x1f80_1803, 0x1f);
+        bus.write8(0x1f80_1800, 0);
+    }
+
+    fn cooked_disc(sectors: usize) -> Vec<u8> {
+        let mut disc = vec![0; sectors * 2048];
+        for sector in 0..sectors {
+            for offset in 0..2048 {
+                disc[sector * 2048 + offset] = offset as u8;
+            }
+        }
+        disc
     }
 }

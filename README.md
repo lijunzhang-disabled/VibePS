@@ -15,13 +15,16 @@ This repository currently contains the first implementation slice:
   GPU linked-list DMA, OTC, and GPU/SPU/CD scaffolding
 - GPU GP0/GP1 command parsing, VRAM upload/readback/copy, flat and textured
   primitive rendering, display register state, and BGR555 frame extraction
+- CD-ROM command/status basics with cooked ISO/raw BIN sector delivery and DMA3
+  transfer support
 - Minimal PS-X EXE loader and CLI runner with BIOS boot trace output
 - Focused unit tests for CPU and memory behavior
 
 It is not yet a playable emulator. Phase 1 CPU/bus, Phase 2 BIOS boot bring-up,
 Phase 3 DMA/timer/IRQ behavior, and the Phase 4 core GPU path are complete
-enough to move on. The next milestones are CD-ROM sector delivery, GTE, SPU,
-controllers, memory cards, GPU timing accuracy, and an SDL frontend.
+enough to move on. Phase 5 CD-ROM has its first sector-read slice in place. The
+next milestones are GTE, SPU, controllers, memory cards, GPU timing accuracy,
+full CD-ROM image/timing compatibility, and an SDL frontend.
 
 ## Run
 
@@ -31,6 +34,7 @@ cargo test
 cargo run -p ps1-frontend -- --bios path/to/SCPH1001.BIN --steps 100000
 cargo run -p ps1-frontend -- --bios path/to/SCPH1001.BIN --steps 100000 --trace debug/boot.trace
 cargo run -p ps1-frontend -- --bios path/to/SCPH1001.BIN --exe path/to/demo.exe --steps 100000
+cargo run -p ps1-frontend -- --bios path/to/SCPH1001.BIN --disc path/to/game.iso --steps 100000
 cargo run -p ps1-frontend -- --exe path/to/test.ps-exe --test-mailbox 0x80010100=1 --steps 100000
 ```
 
@@ -45,6 +49,10 @@ The frontend exposes it through `--test`, `--test-mailbox ADDR=PASS`,
 `--test-stop-pc ADDR`, `--test-pass-reg REG=VALUE`, and `--test-exit-reg REG`.
 A mailbox run stops when the 32-bit mailbox becomes nonzero and passes only when
 it equals the requested pass value.
+
+`--disc PATH` mounts a simple cooked 2048-byte/sector image or raw
+2352-byte/sector image. The sector size is auto-detected from the extension and
+file length, or can be forced with `--disc-sector-size 2048|2352`.
 
 ## Project Docs
 

@@ -1,5 +1,6 @@
 use crate::{audio, video};
 use ps1_core::{
+    cdrom::CdromSectorSize,
     test_runner::{
         PsxExeExitCodeSource, PsxExePassCondition, PsxExeRunReport, PsxExeStopCondition,
         PsxExeTestConfig,
@@ -14,6 +15,8 @@ use std::path::PathBuf;
 #[derive(Debug, Default)]
 struct Args {
     bios: Option<PathBuf>,
+    disc: Option<PathBuf>,
+    disc_sector_size: Option<CdromSectorSize>,
     exe: Option<PathBuf>,
     trace: Option<PathBuf>,
     steps: u64,
@@ -35,6 +38,18 @@ pub fn run() -> Result<(), String> {
     });
 
     let mut ps1 = Ps1::new(bios);
+    if let Some(path) = args.disc.as_ref() {
+        let disc = fs::read(path)
+            .map_err(|err| format!("failed to read disc {}: {err}", path.display()))?;
+        let sector_size = args
+            .disc_sector_size
+            .unwrap_or_else(|| detect_disc_sector_size(path, disc.len()));
+        ps1.bus
+            .cdrom
+            .load_disc_image(disc, sector_size)
+            .map_err(|err| format!("failed to load disc {}: {err:?}", path.display()))?;
+    }
+
     let exe_loaded = if let Some(path) = args.exe.as_ref() {
         let exe = fs::read(path)
             .map_err(|err| format!("failed to read EXE {}: {err}", path.display()))?;
@@ -102,6 +117,15 @@ fn parse_args() -> Result<Args, String> {
         match arg.as_str() {
             "--bios" => {
                 args.bios = Some(PathBuf::from(iter.next().ok_or("--bios requires a path")?));
+            }
+            "--disc" => {
+                args.disc = Some(PathBuf::from(iter.next().ok_or("--disc requires a path")?));
+            }
+            "--disc-sector-size" => {
+                let value = iter
+                    .next()
+                    .ok_or("--disc-sector-size requires 2048 or 2352")?;
+                args.disc_sector_size = Some(parse_disc_sector_size(&value)?);
             }
             "--exe" => {
                 args.exe = Some(PathBuf::from(iter.next().ok_or("--exe requires a path")?));
@@ -225,6 +249,29 @@ fn parse_reg_value(value: &str, name: &str) -> Result<(u8, u32), String> {
     Ok((parse_reg(left)?, parse_u32(right)?))
 }
 
+fn parse_disc_sector_size(value: &str) -> Result<CdromSectorSize, String> {
+    match value.trim() {
+        "2048" => Ok(CdromSectorSize::Cooked2048),
+        "2352" => Ok(CdromSectorSize::Raw2352),
+        _ => Err(format!("invalid --disc-sector-size value: {value}")),
+    }
+}
+
+fn detect_disc_sector_size(path: &std::path::Path, len: usize) -> CdromSectorSize {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let raw_sized = len % 2352 == 0;
+    let raw_extension = matches!(extension.as_str(), "bin" | "img");
+    if raw_sized && (raw_extension || len % 2048 != 0) {
+        CdromSectorSize::Raw2352
+    } else {
+        CdromSectorSize::Cooked2048
+    }
+}
+
 fn parse_reg(value: &str) -> Result<u8, String> {
     let normalized = value.trim().trim_start_matches('$');
     let reg = match normalized {
@@ -290,14 +337,19 @@ fn trace_write_error(err: std::io::Error) -> String {
 
 fn usage_and_exit() -> ! {
     eprintln!(
-        "usage: ps1-frontend [--bios PATH] [--exe PATH] [--steps N] [--trace PATH] [--test] [--test-mailbox ADDR=PASS] [--test-stop-pc ADDR] [--test-pass-reg REG=VALUE] [--test-exit-reg REG]"
+        "usage: ps1-frontend [--bios PATH] [--disc PATH] [--disc-sector-size 2048|2352] [--exe PATH] [--steps N] [--trace PATH] [--test] [--test-mailbox ADDR=PASS] [--test-stop-pc ADDR] [--test-pass-reg REG=VALUE] [--test-exit-reg REG]"
     );
     std::process::exit(2);
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_addr_value, parse_reg, parse_reg_value, parse_u32};
+    use super::{
+        detect_disc_sector_size, parse_addr_value, parse_disc_sector_size, parse_reg,
+        parse_reg_value, parse_u32,
+    };
+    use ps1_core::cdrom::CdromSectorSize;
+    use std::path::Path;
 
     #[test]
     fn parses_test_runner_cli_values() {
@@ -313,6 +365,26 @@ mod tests {
         assert_eq!(
             parse_reg_value("v0=0x1234", "--test-pass-reg").unwrap(),
             (2, 0x1234)
+        );
+    }
+
+    #[test]
+    fn parses_and_detects_disc_sector_size() {
+        assert_eq!(
+            parse_disc_sector_size("2048").unwrap(),
+            CdromSectorSize::Cooked2048
+        );
+        assert_eq!(
+            parse_disc_sector_size("2352").unwrap(),
+            CdromSectorSize::Raw2352
+        );
+        assert_eq!(
+            detect_disc_sector_size(Path::new("game.iso"), 2048 * 16),
+            CdromSectorSize::Cooked2048
+        );
+        assert_eq!(
+            detect_disc_sector_size(Path::new("game.bin"), 2352 * 16),
+            CdromSectorSize::Raw2352
         );
     }
 }

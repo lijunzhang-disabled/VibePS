@@ -17,18 +17,19 @@ This repository currently contains the first implementation slice:
   primitive rendering, display register state, and BGR555 frame extraction
 - CD-ROM command/status basics with cooked ISO/raw BIN/single-track CUE sector
   delivery and DMA3 transfer support
-- GTE register model with first geometry/depth commands: `RTPS`, `RTPT`,
-  `NCLIP`, `AVSZ3`, `AVSZ4`, and `MVMVA`
+- GTE register model with a baseline for documented geometry, arithmetic,
+  lighting, color, interpolation, and depth-cue commands
 - Minimal PS-X EXE loader and CLI runner with BIOS boot trace output
 - Focused unit tests for CPU and memory behavior
 
 It is not yet a playable emulator. Phase 1 CPU/bus, Phase 2 BIOS boot bring-up,
 Phase 3 DMA/timer/IRQ behavior, and the Phase 4 core GPU path are complete
 enough to move on. Phase 5 CD-ROM now has BIOS-facing command coverage and
-single data-track image mounting in place. Phase 6 GTE has its first
-geometry/depth slice. The next milestones are fuller GTE lighting/color
-coverage, SPU, controllers, memory cards, GPU timing accuracy, full CD-ROM
-image/timing compatibility, and an SDL frontend.
+single data-track image mounting in place. Phase 6 GTE now has a documented
+command baseline, while exact divider behavior, saturation corner cases, and
+pipeline timing remain accuracy work. The next milestones are SPU,
+controllers, memory cards, GPU timing accuracy, full CD-ROM image/timing
+compatibility, and an SDL frontend.
 
 ## Run
 
@@ -86,6 +87,7 @@ BIOS mirror at `0xBFC00000`.
 - PSX-SPX I/O map: https://psx-spx.consoledev.net/iomap/
 - PSX-SPX CPU specifications: https://psx-spx.consoledev.net/cpuspecifications/
 - PSX-SPX GPU: https://psx-spx.consoledev.net/graphicsprocessingunitgpu/
+- PSX-SPX GTE: https://psx-spx.consoledev.net/geometrytransformationenginegte/
 - PSX-SPX DMA: https://psx-spx.consoledev.net/dmachannels/
 - PSX-SPX timers: https://psx-spx.consoledev.net/timers/
 - PSX-SPX interrupts: https://psx-spx.consoledev.net/interrupts/

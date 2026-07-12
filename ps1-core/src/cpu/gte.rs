@@ -10,6 +10,9 @@ const FLAG_MAC3_NEG: u32 = 1 << 25;
 const FLAG_IR1_SAT: u32 = 1 << 24;
 const FLAG_IR2_SAT: u32 = 1 << 23;
 const FLAG_IR3_SAT: u32 = 1 << 22;
+const FLAG_RGB_R_SAT: u32 = 1 << 21;
+const FLAG_RGB_G_SAT: u32 = 1 << 20;
+const FLAG_RGB_B_SAT: u32 = 1 << 19;
 const FLAG_OTZ_SAT: u32 = 1 << 18;
 const FLAG_DIV_OVERFLOW: u32 = 1 << 17;
 const FLAG_MAC0_POS: u32 = 1 << 16;
@@ -22,10 +25,26 @@ const FLAG_SUMMARY_MASK: u32 = 0x7f87_e000;
 
 const FN_RTPS: u32 = 0x01;
 const FN_NCLIP: u32 = 0x06;
+const FN_OP: u32 = 0x0c;
+const FN_DPCS: u32 = 0x10;
+const FN_INTPL: u32 = 0x11;
 const FN_MVMVA: u32 = 0x12;
+const FN_NCDS: u32 = 0x13;
+const FN_CDP: u32 = 0x14;
+const FN_NCDT: u32 = 0x16;
+const FN_NCCS: u32 = 0x1b;
+const FN_CC: u32 = 0x1c;
+const FN_NCS: u32 = 0x1e;
+const FN_NCT: u32 = 0x20;
+const FN_SQR: u32 = 0x28;
+const FN_DCPL: u32 = 0x29;
+const FN_DPCT: u32 = 0x2a;
 const FN_AVSZ3: u32 = 0x2d;
 const FN_AVSZ4: u32 = 0x2e;
 const FN_RTPT: u32 = 0x30;
+const FN_GPF: u32 = 0x3d;
+const FN_GPL: u32 = 0x3e;
+const FN_NCCT: u32 = 0x3f;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Gte {
@@ -88,10 +107,26 @@ impl Gte {
         match opcode & 0x3f {
             FN_RTPS => self.rtps(opcode),
             FN_NCLIP => self.nclip(),
+            FN_OP => self.op(opcode),
+            FN_DPCS => self.dpcs(opcode),
+            FN_INTPL => self.intpl(opcode),
             FN_MVMVA => self.mvmva(opcode),
+            FN_NCDS => self.ncds(opcode),
+            FN_CDP => self.cdp(opcode),
+            FN_NCDT => self.ncdt(opcode),
+            FN_NCCS => self.nccs(opcode),
+            FN_CC => self.cc(opcode),
+            FN_NCS => self.ncs(opcode),
+            FN_NCT => self.nct(opcode),
+            FN_SQR => self.sqr(opcode),
+            FN_DCPL => self.dcpl(opcode),
+            FN_DPCT => self.dpct(opcode),
             FN_AVSZ3 => self.avsz3(),
             FN_AVSZ4 => self.avsz4(),
             FN_RTPT => self.rtpt(opcode),
+            FN_GPF => self.gpf(opcode),
+            FN_GPL => self.gpl(opcode),
+            FN_NCCT => self.ncct(opcode),
             _ => {}
         }
     }
@@ -147,6 +182,32 @@ impl Gte {
         self.set_mac0(value);
     }
 
+    fn op(&mut self, opcode: u32) {
+        let sf = shift_fraction(opcode);
+        let lm = limit_mode(opcode);
+        let d1 = self.control_packed_low(0);
+        let d2 = self.control_packed_low(2);
+        let d3 = self.control_as_i64(4);
+        let values = [
+            shift_by_sf(self.ir(3) * d2 - self.ir(2) * d3, sf),
+            shift_by_sf(self.ir(1) * d3 - self.ir(3) * d1, sf),
+            shift_by_sf(self.ir(2) * d1 - self.ir(1) * d2, sf),
+        ];
+        self.set_vector_result(values, lm);
+    }
+
+    fn dpcs(&mut self, opcode: u32) {
+        let base = self.rgbc_components().map(|component| component << 16);
+        let values = self.interpolate_far_color(base, shift_fraction(opcode), limit_mode(opcode));
+        self.push_color_fifo(values);
+    }
+
+    fn intpl(&mut self, opcode: u32) {
+        let base = [self.ir(1) << 12, self.ir(2) << 12, self.ir(3) << 12];
+        let values = self.interpolate_far_color(base, shift_fraction(opcode), limit_mode(opcode));
+        self.push_color_fifo(values);
+    }
+
     fn avsz3(&mut self) {
         let sum = self.data[17] as i64 + self.data[18] as i64 + self.data[19] as i64;
         self.average_z(sum, self.control_as_i64(29));
@@ -177,14 +238,254 @@ impl Gte {
         let vector = self.vector(vector_select);
         let control = self.control_vector(control_select);
         for row in 0..3 {
-            let acc = (control[row] << 12)
-                + matrix[row][0] * vector[0]
-                + matrix[row][1] * vector[1]
-                + matrix[row][2] * vector[2];
+            let acc = if control_select == 2 {
+                matrix[row][1] * vector[1] + matrix[row][2] * vector[2]
+            } else {
+                (control[row] << 12)
+                    + matrix[row][0] * vector[0]
+                    + matrix[row][1] * vector[1]
+                    + matrix[row][2] * vector[2]
+            };
             let value = if sf { acc >> 12 } else { acc };
             self.set_mac(row + 1, value);
             self.limit_ir(row + 1, value, lm, sf);
         }
+    }
+
+    fn ncds(&mut self, opcode: u32) {
+        let values = self.normal_color(0, opcode, true, true);
+        self.push_color_fifo(values);
+    }
+
+    fn cdp(&mut self, opcode: u32) {
+        self.light_color_matrix(opcode);
+        let base = self.primary_color_product();
+        let values = self.interpolate_far_color(base, shift_fraction(opcode), limit_mode(opcode));
+        self.push_color_fifo(values);
+    }
+
+    fn ncdt(&mut self, opcode: u32) {
+        for index in 0..3 {
+            let values = self.normal_color(index, opcode, true, true);
+            self.push_color_fifo(values);
+        }
+    }
+
+    fn nccs(&mut self, opcode: u32) {
+        let values = self.normal_color(0, opcode, true, false);
+        self.push_color_fifo(values);
+    }
+
+    fn cc(&mut self, opcode: u32) {
+        self.light_color_matrix(opcode);
+        let base = self.primary_color_product();
+        let values = self.finish_color_product(base, shift_fraction(opcode), limit_mode(opcode));
+        self.push_color_fifo(values);
+    }
+
+    fn ncs(&mut self, opcode: u32) {
+        let values = self.normal_color(0, opcode, false, false);
+        self.push_color_fifo(values);
+    }
+
+    fn nct(&mut self, opcode: u32) {
+        for index in 0..3 {
+            let values = self.normal_color(index, opcode, false, false);
+            self.push_color_fifo(values);
+        }
+    }
+
+    fn sqr(&mut self, opcode: u32) {
+        let sf = shift_fraction(opcode);
+        let values = [
+            shift_by_sf(self.ir(1) * self.ir(1), sf),
+            shift_by_sf(self.ir(2) * self.ir(2), sf),
+            shift_by_sf(self.ir(3) * self.ir(3), sf),
+        ];
+        self.set_vector_result(values, true);
+    }
+
+    fn dcpl(&mut self, opcode: u32) {
+        let base = self.primary_color_product();
+        let values = self.interpolate_far_color(base, shift_fraction(opcode), limit_mode(opcode));
+        self.push_color_fifo(values);
+    }
+
+    fn dpct(&mut self, opcode: u32) {
+        let sf = shift_fraction(opcode);
+        let lm = limit_mode(opcode);
+        for _ in 0..3 {
+            let base = color_components(self.data[20]).map(|component| component << 16);
+            let values = self.interpolate_far_color(base, sf, lm);
+            self.push_color_fifo(values);
+        }
+    }
+
+    fn gpf(&mut self, opcode: u32) {
+        let sf = shift_fraction(opcode);
+        let lm = limit_mode(opcode);
+        let values = [
+            shift_by_sf(self.ir(1) * self.ir(0), sf),
+            shift_by_sf(self.ir(2) * self.ir(0), sf),
+            shift_by_sf(self.ir(3) * self.ir(0), sf),
+        ];
+        self.set_vector_result(values, lm);
+        self.push_color_fifo(values);
+    }
+
+    fn gpl(&mut self, opcode: u32) {
+        let sf = shift_fraction(opcode);
+        let lm = limit_mode(opcode);
+        let base = [self.mac(1), self.mac(2), self.mac(3)];
+        let values = [
+            shift_by_sf(shift_left_by_sf(base[0], sf) + self.ir(1) * self.ir(0), sf),
+            shift_by_sf(shift_left_by_sf(base[1], sf) + self.ir(2) * self.ir(0), sf),
+            shift_by_sf(shift_left_by_sf(base[2], sf) + self.ir(3) * self.ir(0), sf),
+        ];
+        self.set_vector_result(values, lm);
+        self.push_color_fifo(values);
+    }
+
+    fn ncct(&mut self, opcode: u32) {
+        for index in 0..3 {
+            let values = self.normal_color(index, opcode, true, false);
+            self.push_color_fifo(values);
+        }
+    }
+
+    fn normal_color(
+        &mut self,
+        vector_index: usize,
+        opcode: u32,
+        multiply_color: bool,
+        depth_cue: bool,
+    ) -> [i64; 3] {
+        let sf = shift_fraction(opcode);
+        let lm = limit_mode(opcode);
+        self.light_source_matrix(vector_index, sf, lm);
+        let values = self.light_color_matrix(opcode);
+        if !multiply_color {
+            return values;
+        }
+
+        let base = self.primary_color_product();
+        if depth_cue {
+            self.interpolate_far_color(base, sf, lm)
+        } else {
+            self.finish_color_product(base, sf, lm)
+        }
+    }
+
+    fn light_source_matrix(&mut self, vector_index: usize, sf: bool, lm: bool) -> [i64; 3] {
+        let matrix = self.matrix(1);
+        let vector = self.vector(vector_index);
+        let values = [
+            shift_by_sf(
+                matrix[0][0] * vector[0] + matrix[0][1] * vector[1] + matrix[0][2] * vector[2],
+                sf,
+            ),
+            shift_by_sf(
+                matrix[1][0] * vector[0] + matrix[1][1] * vector[1] + matrix[1][2] * vector[2],
+                sf,
+            ),
+            shift_by_sf(
+                matrix[2][0] * vector[0] + matrix[2][1] * vector[1] + matrix[2][2] * vector[2],
+                sf,
+            ),
+        ];
+        self.set_vector_result(values, lm);
+        values
+    }
+
+    fn light_color_matrix(&mut self, opcode: u32) -> [i64; 3] {
+        let sf = shift_fraction(opcode);
+        let lm = limit_mode(opcode);
+        let matrix = self.matrix(2);
+        let values = [
+            shift_by_sf(
+                (self.control_as_i64(13) << 12)
+                    + matrix[0][0] * self.ir(1)
+                    + matrix[0][1] * self.ir(2)
+                    + matrix[0][2] * self.ir(3),
+                sf,
+            ),
+            shift_by_sf(
+                (self.control_as_i64(14) << 12)
+                    + matrix[1][0] * self.ir(1)
+                    + matrix[1][1] * self.ir(2)
+                    + matrix[1][2] * self.ir(3),
+                sf,
+            ),
+            shift_by_sf(
+                (self.control_as_i64(15) << 12)
+                    + matrix[2][0] * self.ir(1)
+                    + matrix[2][1] * self.ir(2)
+                    + matrix[2][2] * self.ir(3),
+                sf,
+            ),
+        ];
+        self.set_vector_result(values, lm);
+        values
+    }
+
+    fn primary_color_product(&mut self) -> [i64; 3] {
+        let [red, green, blue] = self.rgbc_components();
+        let values = [
+            (red * self.ir(1)) << 4,
+            (green * self.ir(2)) << 4,
+            (blue * self.ir(3)) << 4,
+        ];
+        for (index, value) in values.into_iter().enumerate() {
+            self.set_mac(index + 1, value);
+        }
+        values
+    }
+
+    fn finish_color_product(&mut self, values: [i64; 3], sf: bool, lm: bool) -> [i64; 3] {
+        let shifted = values.map(|value| shift_by_sf(value, sf));
+        self.set_vector_result(shifted, lm);
+        shifted
+    }
+
+    fn interpolate_far_color(&mut self, base: [i64; 3], sf: bool, lm: bool) -> [i64; 3] {
+        let mut values = [0; 3];
+        for (index, base_value) in base.into_iter().enumerate() {
+            let register = index + 1;
+            self.set_mac(register, base_value);
+            let far_color = self.control_as_i64(20 + register) << 12;
+            let delta = shift_by_sf(far_color - base_value, sf);
+            self.limit_ir(register, delta, false, true);
+            let interpolated = base_value + self.ir(register) * self.ir(0);
+            self.set_mac(register, interpolated);
+            values[index] = shift_by_sf(interpolated, sf);
+        }
+        self.set_vector_result(values, lm);
+        values
+    }
+
+    fn set_vector_result(&mut self, values: [i64; 3], lm: bool) {
+        for (index, value) in values.into_iter().enumerate() {
+            self.set_mac(index + 1, value);
+            self.limit_ir(index + 1, value, lm, true);
+        }
+    }
+
+    fn push_color_fifo(&mut self, values: [i64; 3]) {
+        let red = self.limit_color_channel(0, values[0] >> 4);
+        let green = self.limit_color_channel(1, values[1] >> 4);
+        let blue = self.limit_color_channel(2, values[2] >> 4);
+        let color = (self.rgbc_code() << 24) | (blue << 16) | (green << 8) | red;
+        self.data[20] = self.data[21];
+        self.data[21] = self.data[22];
+        self.data[22] = color;
+    }
+
+    fn limit_color_channel(&mut self, index: usize, value: i64) -> u32 {
+        let clamped = value.clamp(0, 0xff);
+        if clamped != value {
+            self.set_flag([FLAG_RGB_R_SAT, FLAG_RGB_G_SAT, FLAG_RGB_B_SAT][index]);
+        }
+        clamped as u32
     }
 
     fn matrix(&self, select: usize) -> [[i64; 3]; 3] {
@@ -192,7 +493,16 @@ impl Gte {
             0 => 0,
             1 => 8,
             2 => 16,
-            _ => return [[0; 3]; 3],
+            _ => {
+                let red = (self.data[6] & 0xff) as i64;
+                let rt13 = self.control_packed_low(1);
+                let rt22 = self.control_packed_low(2);
+                return [
+                    [-red * 0x10, red * 0x10, self.ir(0)],
+                    [rt13, rt13, rt13],
+                    [rt22, rt22, rt22],
+                ];
+            }
         };
         [
             [
@@ -357,6 +667,18 @@ impl Gte {
         self.data[8 + index] as i32 as i64
     }
 
+    fn mac(&self, index: usize) -> i64 {
+        self.data[24 + index] as i32 as i64
+    }
+
+    fn rgbc_components(&self) -> [i64; 3] {
+        color_components(self.data[6])
+    }
+
+    fn rgbc_code(&self) -> u32 {
+        (self.data[6] >> 24) & 0xff
+    }
+
     fn h(&self) -> i64 {
         self.control[26] as i32 as i64
     }
@@ -415,8 +737,32 @@ fn limit_mode(opcode: u32) -> bool {
     ((opcode >> 10) & 1) != 0
 }
 
+fn shift_by_sf(value: i64, sf: bool) -> i64 {
+    if sf {
+        value >> 12
+    } else {
+        value
+    }
+}
+
+fn shift_left_by_sf(value: i64, sf: bool) -> i64 {
+    if sf {
+        value << 12
+    } else {
+        value
+    }
+}
+
 fn pack_i16_pair(x: i16, y: i16) -> u32 {
     (x as u16 as u32) | ((y as u16 as u32) << 16)
+}
+
+fn color_components(value: u32) -> [i64; 3] {
+    [
+        (value & 0xff) as i64,
+        ((value >> 8) & 0xff) as i64,
+        ((value >> 16) & 0xff) as i64,
+    ]
 }
 
 #[cfg(test)]
@@ -425,10 +771,23 @@ mod tests {
 
     const FN_RTPS: u32 = 0x01;
     const FN_NCLIP: u32 = 0x06;
+    const FN_OP: u32 = 0x0c;
+    const FN_DPCS: u32 = 0x10;
+    const FN_INTPL: u32 = 0x11;
     const FN_MVMVA: u32 = 0x12;
+    const FN_CDP: u32 = 0x14;
+    const FN_NCCS: u32 = 0x1b;
+    const FN_CC: u32 = 0x1c;
+    const FN_NCS: u32 = 0x1e;
+    const FN_NCT: u32 = 0x20;
+    const FN_SQR: u32 = 0x28;
+    const FN_DCPL: u32 = 0x29;
+    const FN_DPCT: u32 = 0x2a;
     const FN_AVSZ3: u32 = 0x2d;
     const FN_AVSZ4: u32 = 0x2e;
     const FN_RTPT: u32 = 0x30;
+    const FN_GPF: u32 = 0x3d;
+    const FN_GPL: u32 = 0x3e;
 
     #[test]
     fn register_io_applies_gte_special_cases() {
@@ -604,6 +963,220 @@ mod tests {
     }
 
     #[test]
+    fn mvmva_handles_reserved_matrix_and_bugged_far_color_vector() {
+        let mut gte = Gte::new();
+        gte.write_data(6, 5);
+        gte.write_data(8, 7);
+        gte.write_control(1, 11);
+        gte.write_control(2, 13);
+        gte.write_data(0, (3 << 16) | 2);
+        gte.write_data(1, 4);
+
+        gte.execute_command(gte_op(0, 3, 0, 3, 0, FN_MVMVA));
+
+        assert_eq!(gte.read_data(25), 108);
+        assert_eq!(gte.read_data(26), 99);
+        assert_eq!(gte.read_data(27), 117);
+
+        gte.write_control(0, (2 << 16) | 1);
+        gte.write_control(1, (4 << 16) | 3);
+        gte.write_control(2, (6 << 16) | 5);
+        gte.write_control(3, (8 << 16) | 7);
+        gte.write_control(4, 9);
+        gte.write_data(0, (20 << 16) | 10);
+        gte.write_data(1, 30);
+
+        gte.execute_command(gte_op(0, 0, 0, 2, 0, FN_MVMVA));
+
+        assert_eq!(gte.read_data(25), 130);
+        assert_eq!(gte.read_data(26), 280);
+        assert_eq!(gte.read_data(27), 430);
+    }
+
+    #[test]
+    fn sqr_and_op_execute_vector_arithmetic() {
+        let mut gte = Gte::new();
+        gte.write_data(9, 0x1000);
+        gte.write_data(10, (-0x1000i32) as u32);
+        gte.write_data(11, 0x2000);
+
+        gte.execute_command(gte_op(1, 0, 0, 0, 0, FN_SQR));
+
+        assert_eq!(gte.read_data(25), 0x1000);
+        assert_eq!(gte.read_data(26), 0x1000);
+        assert_eq!(gte.read_data(27), 0x4000);
+        assert_eq!(gte.read_data(9), 0x1000);
+        assert_eq!(gte.read_data(10), 0x1000);
+        assert_eq!(gte.read_data(11), 0x4000);
+
+        gte.write_control(0, 2);
+        gte.write_control(2, 3);
+        gte.write_control(4, 4);
+        gte.write_data(9, 10);
+        gte.write_data(10, 20);
+        gte.write_data(11, 30);
+
+        gte.execute_command(gte_op(0, 0, 0, 0, 0, FN_OP));
+
+        assert_eq!(gte.read_data(25), 10);
+        assert_eq!(gte.read_data(26), (-20i32) as u32);
+        assert_eq!(gte.read_data(27), 10);
+    }
+
+    #[test]
+    fn gpf_and_gpl_update_ir_and_color_fifo() {
+        let mut gte = Gte::new();
+        gte.write_data(6, 0x2a00_0000);
+        gte.write_data(8, 0x0800);
+        gte.write_data(9, 0x1000);
+        gte.write_data(10, 0x0800);
+        gte.write_data(11, (-0x1000i32) as u32);
+
+        gte.execute_command(gte_op(1, 0, 0, 0, 0, FN_GPF));
+
+        assert_eq!(gte.read_data(25), 0x0800);
+        assert_eq!(gte.read_data(26), 0x0400);
+        assert_eq!(gte.read_data(27), (-0x0800i32) as u32);
+        assert_eq!(gte.read_data(22), 0x2a00_4080);
+        assert_ne!(gte.read_control(31) & (1 << 19), 0);
+
+        gte.write_data(8, 2);
+        gte.write_data(9, 100);
+        gte.write_data(10, 200);
+        gte.write_data(11, 300);
+        gte.write_data(25, 1000);
+        gte.write_data(26, 2000);
+        gte.write_data(27, 3000);
+
+        gte.execute_command(gte_op(0, 0, 0, 0, 0, FN_GPL));
+
+        assert_eq!(gte.read_data(25), 1200);
+        assert_eq!(gte.read_data(26), 2400);
+        assert_eq!(gte.read_data(27), 3600);
+        assert_eq!(gte.read_data(22), 0x2ae1_964b);
+    }
+
+    #[test]
+    fn dpcs_and_intpl_interpolate_to_far_color_and_push_rgb_fifo() {
+        let mut gte = Gte::new();
+        gte.write_data(6, 0x33c0_8040);
+        gte.write_data(8, 0x0800);
+        gte.write_control(21, 128);
+        gte.write_control(22, 64);
+        gte.write_control(23, 32);
+
+        gte.execute_command(gte_op(1, 0, 0, 0, 0, FN_DPCS));
+
+        assert_eq!(gte.read_data(9), 576);
+        assert_eq!(gte.read_data(10), 1056);
+        assert_eq!(gte.read_data(11), 1552);
+        assert_eq!(gte.read_data(22), 0x3361_4224);
+
+        gte.write_data(6, 0x4400_0000);
+        gte.write_data(8, 0x1000);
+        gte.write_data(9, 100);
+        gte.write_data(10, 200);
+        gte.write_data(11, 300);
+        gte.write_control(21, 200);
+        gte.write_control(22, 100);
+        gte.write_control(23, 50);
+
+        gte.execute_command(gte_op(1, 0, 0, 0, 0, FN_INTPL));
+
+        assert_eq!(gte.read_data(9), 200);
+        assert_eq!(gte.read_data(10), 100);
+        assert_eq!(gte.read_data(11), 50);
+        assert_eq!(gte.read_data(22), 0x4403_060c);
+    }
+
+    #[test]
+    fn dcpl_dpct_cc_and_cdp_update_color_fifo() {
+        let mut gte = Gte::new();
+        gte.write_data(6, 0x7760_4020);
+        gte.write_data(8, 0);
+        gte.write_data(9, 0x1000);
+        gte.write_data(10, 0x1000);
+        gte.write_data(11, 0x1000);
+
+        gte.execute_command(gte_op(1, 0, 0, 0, 1, FN_DCPL));
+
+        assert_eq!(gte.read_data(22), 0x7760_4020);
+
+        gte.write_data(6, 0x7700_0000);
+        gte.write_data(8, 0);
+        gte.write_data(20, 0x1103_0201);
+        gte.write_data(21, 0x2206_0504);
+        gte.write_data(22, 0x3309_0807);
+
+        gte.execute_command(gte_op(1, 0, 0, 0, 1, FN_DPCT));
+
+        assert_eq!(gte.read_data(20), 0x7703_0201);
+        assert_eq!(gte.read_data(21), 0x7706_0504);
+        assert_eq!(gte.read_data(22), 0x7709_0807);
+
+        set_color_identity(&mut gte);
+        gte.write_data(6, 0x8840_3020);
+        gte.write_data(8, 0);
+        gte.write_data(9, 0x1000);
+        gte.write_data(10, 0x0800);
+        gte.write_data(11, 0x0400);
+
+        gte.execute_command(gte_op(1, 0, 0, 0, 1, FN_CC));
+
+        assert_eq!(gte.read_data(22), 0x8810_1820);
+
+        gte.write_data(8, 0x1000);
+        gte.write_control(21, 1);
+        gte.write_control(22, 2);
+        gte.write_control(23, 3);
+
+        gte.execute_command(gte_op(1, 0, 0, 0, 1, FN_CDP));
+
+        assert_eq!(gte.read_data(22), 0x8800_0000);
+    }
+
+    #[test]
+    fn ncs_and_nccs_use_light_and_color_matrices() {
+        let mut gte = Gte::new();
+        set_light_identity(&mut gte);
+        set_color_identity(&mut gte);
+        gte.write_data(6, 0x5500_0000);
+        gte.write_data(0, (0x0400 << 16) | 0x0800);
+        gte.write_data(1, 0x0200);
+
+        gte.execute_command(gte_op(1, 0, 0, 0, 1, FN_NCS));
+
+        assert_eq!(gte.read_data(9), 0x0800);
+        assert_eq!(gte.read_data(10), 0x0400);
+        assert_eq!(gte.read_data(11), 0x0200);
+        assert_eq!(gte.read_data(22), 0x5520_4080);
+
+        gte.write_data(6, 0x55ff_8040);
+        gte.write_data(0, (0x1000 << 16) | 0x1000);
+        gte.write_data(1, 0x1000);
+
+        gte.execute_command(gte_op(1, 0, 0, 0, 1, FN_NCCS));
+
+        assert_eq!(gte.read_data(9), 0x0400);
+        assert_eq!(gte.read_data(10), 0x0800);
+        assert_eq!(gte.read_data(11), 0x0ff0);
+        assert_eq!(gte.read_data(22), 0x55ff_8040);
+
+        gte.write_data(0, (0x0100 << 16) | 0x0200);
+        gte.write_data(1, 0x0080);
+        gte.write_data(2, (0x0080 << 16) | 0x0100);
+        gte.write_data(3, 0x0040);
+        gte.write_data(4, (0x0040 << 16) | 0x0080);
+        gte.write_data(5, 0x0020);
+
+        gte.execute_command(gte_op(1, 0, 0, 0, 1, FN_NCT));
+
+        assert_eq!(gte.read_data(20), 0x5508_1020);
+        assert_eq!(gte.read_data(21), 0x5504_0810);
+        assert_eq!(gte.read_data(22), 0x5502_0408);
+    }
+
+    #[test]
     fn rtps_projects_single_vertex_and_sets_depth_cue() {
         let mut gte = Gte::new();
         set_identity_rotation(&mut gte);
@@ -685,6 +1258,22 @@ mod tests {
         gte.write_control(2, 0);
         gte.write_control(3, 0);
         gte.write_control(4, 0x1000);
+    }
+
+    fn set_light_identity(gte: &mut Gte) {
+        gte.write_control(8, 0x0000_1000);
+        gte.write_control(9, 0x0000_0000);
+        gte.write_control(10, 0x0000_1000);
+        gte.write_control(11, 0x0000_0000);
+        gte.write_control(12, 0x1000);
+    }
+
+    fn set_color_identity(gte: &mut Gte) {
+        gte.write_control(16, 0x0000_1000);
+        gte.write_control(17, 0x0000_0000);
+        gte.write_control(18, 0x0000_1000);
+        gte.write_control(19, 0x0000_0000);
+        gte.write_control(20, 0x1000);
     }
 
     fn set_translation(gte: &mut Gte, x: i32, y: i32, z: i32) {

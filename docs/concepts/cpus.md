@@ -11,7 +11,7 @@ The first emulator target is instruction correctness:
 - One-instruction load delay
 - COP0 status/cause/EPC behavior
 - COP0 interrupt delivery from `SR.IM & Cause.IP`
-- GTE register transfers and the first geometry/depth commands
+- GTE register transfers and documented-command baseline execution
 - `SR.IsC` isolated-cache behavior for BIOS cache flush loops
 - Instruction bus errors, data bus errors, and cached KUSEG/KSEG0 fetches
 

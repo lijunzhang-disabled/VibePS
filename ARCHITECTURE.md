@@ -69,7 +69,7 @@ The first CPU target is a MIPS R3000A-style interpreter:
 - Branch delay via `pc`/`next_pc`
 - One-instruction load delay
 - COP0 status/cause/EPC/basic exception handling
-- COP2/GTE register transfers plus first geometry/depth command execution
+- COP2/GTE register transfers plus documented-command baseline execution
 
 The implementation starts with a simple fixed cycle cost per instruction. Bus
 wait states, DMA contention, cache behavior, and GTE pipeline timings belong in
@@ -110,6 +110,7 @@ The hardware details in this plan are based mainly on PSX-SPX:
 - I/O register ranges: https://psx-spx.consoledev.net/iomap/
 - CPU opcode map: https://psx-spx.consoledev.net/cpuspecifications/
 - GPU commands and VRAM: https://psx-spx.consoledev.net/graphicsprocessingunitgpu/
+- GTE command/register behavior: https://psx-spx.consoledev.net/geometrytransformationenginegte/
 - DMA channels: https://psx-spx.consoledev.net/dmachannels/
 - Root counters: https://psx-spx.consoledev.net/timers/
 - Interrupt controller: https://psx-spx.consoledev.net/interrupts/

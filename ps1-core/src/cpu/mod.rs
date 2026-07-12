@@ -740,6 +740,14 @@ mod tests {
         (op << 26) | (rs << 21) | (rt << 16) | (rd << 11) | funct
     }
 
+    fn cop2_command(command: u32) -> u32 {
+        (0x12 << 26) | (1 << 25) | command
+    }
+
+    fn gte_op(sf: u32, mx: u32, v: u32, cv: u32, lm: u32, function: u32) -> u32 {
+        (sf << 19) | (mx << 17) | (v << 15) | (cv << 13) | (lm << 10) | function
+    }
+
     fn write_program(bus: &mut Bus, base: u32, words: &[u32]) {
         for (i, word) in words.iter().enumerate() {
             bus.write32(base + (i as u32 * 4), *word);
@@ -773,6 +781,36 @@ mod tests {
         assert_eq!(cpu.regs[3], 0x12ff);
         assert_eq!(cpu.regs[4], 0x12ff);
         assert_eq!(cpu.regs[5], 0x25fe);
+    }
+
+    #[test]
+    fn cop2_command_dispatch_executes_gte_rtps() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(None);
+        cpu.set_pc(0x8000_0000);
+        cpu.gte.write_control(0, 0x0000_1000);
+        cpu.gte.write_control(1, 0);
+        cpu.gte.write_control(2, 0x0000_1000);
+        cpu.gte.write_control(3, 0);
+        cpu.gte.write_control(4, 0x1000);
+        cpu.gte.write_control(5, 0);
+        cpu.gte.write_control(6, 0);
+        cpu.gte.write_control(7, 1000);
+        cpu.gte.write_control(24, 160 << 16);
+        cpu.gte.write_control(25, 120 << 16);
+        cpu.gte.write_control(26, 200);
+        cpu.gte.write_data(0, 0);
+        cpu.gte.write_data(1, 0);
+        write_program(
+            &mut bus,
+            0x0000_0000,
+            &[cop2_command(gte_op(1, 0, 0, 0, 0, 0x01))],
+        );
+
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.gte.read_data(19), 1000);
+        assert_eq!(cpu.gte.read_data(14), (120 << 16) | 160);
     }
 
     #[test]

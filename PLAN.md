@@ -10,7 +10,7 @@
 | Phase 3: DMA + timers + IRQs | Done | DMA modes/channels, GPU linked lists, OTC, DICR/DPCR IRQs, root-counter modes |
 | Phase 4: GPU | Done | GP0/GP1 parser, VRAM transfers, polygons, rectangles, display output |
 | Phase 5: CD-ROM | In progress | BIOS-facing commands, Setloc/ReadN sector reads, cooked ISO/raw BIN/CUE data, DMA3 |
-| Phase 6: GTE | Pending | COP2 register model and matrix/vector commands |
+| Phase 6: GTE | In progress | COP2 register model, RTPS/RTPT, NCLIP, AVSZ, MVMVA baseline |
 | Phase 7: Controllers + memory cards | Pending | JOY serial protocol, digital/analog pads, card EEPROM protocol |
 | Phase 8: SPU | Pending | 24 ADPCM voices, ADSR, pitch, reverb, CD audio mixing |
 | Phase 9: MDEC + compatibility | Pending | FMV decode path, game-focused bug fixing, save states |
@@ -25,7 +25,7 @@
 | DMA | Channels 2 and 6 first because GPU linked lists and OTC are core boot/game paths |
 | Timers | System-clock timers first, then dotclock/HBlank/VBlank sync |
 | CD-ROM | BIOS command compatibility before XA/audio details |
-| GTE | Register transfers first, RTPS/RTPT/NCLIP/AVSZ/MVMVA next |
+| GTE | Register transfers, RTPS/RTPT/NCLIP/AVSZ/MVMVA first, lighting/color next |
 | SPU | RAM transfer path first, then ADPCM voice output |
 
 ## Phase 1 Details: CPU + Bus
@@ -74,6 +74,21 @@
    bus-level test.
 4. Add multi-track/session parsing, response timing, repeated read cadence,
    seek latency, error details, and XA/CD-DA behavior. Pending.
+
+## Phase 6 Details: GTE
+
+1. Implement the COP2 register model. In progress: data/control register
+   special cases are covered for sign extension, zero extension, `SXY` FIFO
+   pushes, `IRGB`/`ORGB`, `LZCS`/`LZCR`, and `FLAG` summary bits.
+2. Execute geometry and depth commands. In progress: `RTPS`, `RTPT`, `NCLIP`,
+   `AVSZ3`, `AVSZ4`, and a baseline `MVMVA` implementation are covered by
+   native tests and one CPU-level COP2 dispatch test.
+3. Implement the remaining GTE arithmetic and color/lighting commands. Pending:
+   `SQR`, `OP`, `GPF`, `GPL`, `DPCS`, `DPCT`, `DCPL`, `INTPL`, `NCS`, `NCT`,
+   `NCCS`, `NCCT`, `NCDS`, `NCDT`, `CC`, and `CDP`.
+4. Add edge-case compatibility. Pending: exact divider/table behavior,
+   undocumented `MVMVA` `mx=3`/`cv=2` behavior, saturation corner cases, and
+   pipeline timing.
 
 ## Phase 5+ Compatibility
 

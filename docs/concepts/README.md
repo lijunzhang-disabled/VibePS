@@ -8,7 +8,7 @@ Current notes:
 - [CPUs](cpus.md)
 - [Memory Map](memory-map.md)
 - [GPU Command Flow](gpu-command-flow.md)
+- [GTE](gte.md)
 - [DMA, Timers, and Interrupts](dma-timers-interrupts.md)
 - [CD-ROM](cdrom.md)
 - [SPU Audio](spu-audio.md)
-

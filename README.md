@@ -15,16 +15,17 @@ This repository currently contains the first implementation slice:
   GPU linked-list DMA, OTC, and GPU/SPU/CD scaffolding
 - GPU GP0/GP1 command parsing, VRAM upload/readback/copy, flat and textured
   primitive rendering, display register state, and BGR555 frame extraction
-- CD-ROM command/status basics with cooked ISO/raw BIN sector delivery and DMA3
-  transfer support
+- CD-ROM command/status basics with cooked ISO/raw BIN/single-track CUE sector
+  delivery and DMA3 transfer support
 - Minimal PS-X EXE loader and CLI runner with BIOS boot trace output
 - Focused unit tests for CPU and memory behavior
 
 It is not yet a playable emulator. Phase 1 CPU/bus, Phase 2 BIOS boot bring-up,
 Phase 3 DMA/timer/IRQ behavior, and the Phase 4 core GPU path are complete
-enough to move on. Phase 5 CD-ROM has its first sector-read slice in place. The
-next milestones are GTE, SPU, controllers, memory cards, GPU timing accuracy,
-full CD-ROM image/timing compatibility, and an SDL frontend.
+enough to move on. Phase 5 CD-ROM now has BIOS-facing command coverage and
+single data-track image mounting in place. The next milestones are GTE, SPU,
+controllers, memory cards, GPU timing accuracy, full CD-ROM image/timing
+compatibility, and an SDL frontend.
 
 ## Run
 
@@ -50,9 +51,10 @@ The frontend exposes it through `--test`, `--test-mailbox ADDR=PASS`,
 A mailbox run stops when the 32-bit mailbox becomes nonzero and passes only when
 it equals the requested pass value.
 
-`--disc PATH` mounts a simple cooked 2048-byte/sector image or raw
-2352-byte/sector image. The sector size is auto-detected from the extension and
-file length, or can be forced with `--disc-sector-size 2048|2352`.
+`--disc PATH` mounts a simple cooked 2048-byte/sector image, raw
+2352-byte/sector image, or single data-track `.cue` pointing at one of those
+images. The sector size is auto-detected from the extension/file length or CUE
+track mode, and can be forced with `--disc-sector-size 2048|2352`.
 
 ## Project Docs
 

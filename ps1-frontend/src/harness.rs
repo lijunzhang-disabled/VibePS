@@ -10,7 +10,7 @@ use ps1_core::{
 use std::env;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Default)]
 struct Args {
@@ -39,11 +39,7 @@ pub fn run() -> Result<(), String> {
 
     let mut ps1 = Ps1::new(bios);
     if let Some(path) = args.disc.as_ref() {
-        let disc = fs::read(path)
-            .map_err(|err| format!("failed to read disc {}: {err}", path.display()))?;
-        let sector_size = args
-            .disc_sector_size
-            .unwrap_or_else(|| detect_disc_sector_size(path, disc.len()));
+        let (disc, sector_size) = load_disc_image(path, args.disc_sector_size)?;
         ps1.bus
             .cdrom
             .load_disc_image(disc, sector_size)
@@ -257,7 +253,187 @@ fn parse_disc_sector_size(value: &str) -> Result<CdromSectorSize, String> {
     }
 }
 
-fn detect_disc_sector_size(path: &std::path::Path, len: usize) -> CdromSectorSize {
+fn load_disc_image(
+    path: &Path,
+    forced_sector_size: Option<CdromSectorSize>,
+) -> Result<(Vec<u8>, CdromSectorSize), String> {
+    if is_cue_path(path) {
+        let cue = fs::read_to_string(path)
+            .map_err(|err| format!("failed to read CUE {}: {err}", path.display()))?;
+        let spec = parse_cue_disc_spec(path, &cue)?;
+        let mut image = fs::read(&spec.image_path)
+            .map_err(|err| format!("failed to read disc {}: {err}", spec.image_path.display()))?;
+        let byte_offset = spec
+            .index01_frames
+            .checked_mul(spec.sector_size.bytes())
+            .ok_or_else(|| format!("CUE index offset overflows usize: {}", path.display()))?;
+        if byte_offset > image.len() {
+            return Err(format!(
+                "CUE index offset exceeds image length: {}",
+                path.display()
+            ));
+        }
+        if byte_offset != 0 {
+            image.drain(0..byte_offset);
+        }
+        let sector_size = forced_sector_size.unwrap_or(spec.sector_size);
+        return Ok((image, sector_size));
+    }
+
+    let image =
+        fs::read(path).map_err(|err| format!("failed to read disc {}: {err}", path.display()))?;
+    let sector_size =
+        forced_sector_size.unwrap_or_else(|| detect_disc_sector_size(path, image.len()));
+    Ok((image, sector_size))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CueDiscSpec {
+    image_path: PathBuf,
+    sector_size: CdromSectorSize,
+    index01_frames: usize,
+}
+
+fn parse_cue_disc_spec(cue_path: &Path, text: &str) -> Result<CueDiscSpec, String> {
+    let cue_dir = cue_path.parent().unwrap_or_else(|| Path::new(""));
+    let mut current_file: Option<PathBuf> = None;
+    let mut selected: Option<CueDiscSpec> = None;
+    let mut selected_track_open = false;
+
+    for line in text.lines().map(str::trim) {
+        if line.is_empty() || cue_keyword_is(line, "REM") {
+            continue;
+        }
+        if let Some(file_path) = parse_cue_file_path(line) {
+            let path = PathBuf::from(file_path);
+            current_file = Some(if path.is_absolute() {
+                path
+            } else {
+                cue_dir.join(path)
+            });
+            selected_track_open = false;
+            continue;
+        }
+        if let Some(mode) = parse_cue_track_mode(line) {
+            if selected.is_some() || mode.eq_ignore_ascii_case("AUDIO") {
+                selected_track_open = false;
+                continue;
+            }
+            let sector_size = cue_track_sector_size(mode)
+                .ok_or_else(|| format!("unsupported CUE track mode: {mode}"))?;
+            let image_path = current_file
+                .clone()
+                .ok_or_else(|| "CUE TRACK appears before FILE".to_string())?;
+            selected = Some(CueDiscSpec {
+                image_path,
+                sector_size,
+                index01_frames: 0,
+            });
+            selected_track_open = true;
+            continue;
+        }
+        if selected_track_open {
+            if let Some(index01_frames) = parse_cue_index01(line)? {
+                if let Some(spec) = selected.as_mut() {
+                    spec.index01_frames = index01_frames;
+                }
+                selected_track_open = false;
+            }
+        }
+    }
+
+    selected.ok_or_else(|| "CUE does not contain a supported data track".to_string())
+}
+
+fn parse_cue_file_path(line: &str) -> Option<String> {
+    let rest = cue_keyword_rest(line, "FILE")?;
+    if let Some(quoted) = rest.strip_prefix('"') {
+        let end = quoted.find('"')?;
+        Some(quoted[..end].to_string())
+    } else {
+        rest.split_whitespace().next().map(str::to_string)
+    }
+}
+
+fn parse_cue_track_mode(line: &str) -> Option<&str> {
+    if !cue_keyword_is(line, "TRACK") {
+        return None;
+    }
+    line.split_whitespace().nth(2)
+}
+
+fn parse_cue_index01(line: &str) -> Result<Option<usize>, String> {
+    if !cue_keyword_is(line, "INDEX") {
+        return Ok(None);
+    }
+    let mut parts = line.split_whitespace();
+    let _keyword = parts.next();
+    let Some(index) = parts.next() else {
+        return Err("malformed CUE INDEX line".to_string());
+    };
+    if index != "01" {
+        return Ok(None);
+    }
+    let msf = parts
+        .next()
+        .ok_or_else(|| "CUE INDEX 01 requires MM:SS:FF".to_string())?;
+    parse_cue_msf(msf).map(Some)
+}
+
+fn parse_cue_msf(value: &str) -> Result<usize, String> {
+    let mut parts = value.split(':');
+    let minute = parts
+        .next()
+        .ok_or_else(|| format!("invalid CUE MSF value: {value}"))?
+        .parse::<usize>()
+        .map_err(|_| format!("invalid CUE MSF value: {value}"))?;
+    let second = parts
+        .next()
+        .ok_or_else(|| format!("invalid CUE MSF value: {value}"))?
+        .parse::<usize>()
+        .map_err(|_| format!("invalid CUE MSF value: {value}"))?;
+    let frame = parts
+        .next()
+        .ok_or_else(|| format!("invalid CUE MSF value: {value}"))?
+        .parse::<usize>()
+        .map_err(|_| format!("invalid CUE MSF value: {value}"))?;
+    if parts.next().is_some() || second >= 60 || frame >= 75 {
+        return Err(format!("invalid CUE MSF value: {value}"));
+    }
+    Ok(((minute * 60) + second) * 75 + frame)
+}
+
+fn cue_track_sector_size(mode: &str) -> Option<CdromSectorSize> {
+    match mode.to_ascii_uppercase().as_str() {
+        "MODE1/2048" | "MODE2/2048" => Some(CdromSectorSize::Cooked2048),
+        "MODE1/2352" | "MODE2/2352" | "CDI/2352" => Some(CdromSectorSize::Raw2352),
+        _ => None,
+    }
+}
+
+fn cue_keyword_is(line: &str, keyword: &str) -> bool {
+    line.split_whitespace()
+        .next()
+        .is_some_and(|value| value.eq_ignore_ascii_case(keyword))
+}
+
+fn cue_keyword_rest<'a>(line: &'a str, keyword: &str) -> Option<&'a str> {
+    let trimmed = line.trim_start();
+    let keyword_len = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+    if trimmed[..keyword_len].eq_ignore_ascii_case(keyword) {
+        Some(trimmed[keyword_len..].trim_start())
+    } else {
+        None
+    }
+}
+
+fn is_cue_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("cue"))
+}
+
+fn detect_disc_sector_size(path: &Path, len: usize) -> CdromSectorSize {
     let extension = path
         .extension()
         .and_then(|value| value.to_str())
@@ -345,11 +521,11 @@ fn usage_and_exit() -> ! {
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_disc_sector_size, parse_addr_value, parse_disc_sector_size, parse_reg,
-        parse_reg_value, parse_u32,
+        detect_disc_sector_size, parse_addr_value, parse_cue_disc_spec, parse_cue_msf,
+        parse_disc_sector_size, parse_reg, parse_reg_value, parse_u32,
     };
     use ps1_core::cdrom::CdromSectorSize;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn parses_test_runner_cli_values() {
@@ -386,5 +562,54 @@ mod tests {
             detect_disc_sector_size(Path::new("game.bin"), 2352 * 16),
             CdromSectorSize::Raw2352
         );
+    }
+
+    #[test]
+    fn parses_cue_data_track_with_quoted_file_and_index() {
+        let spec = parse_cue_disc_spec(
+            Path::new("/games/sample/game.cue"),
+            r#"
+                REM Generated by a dump tool
+                FILE "Game Disc.bin" BINARY
+                  TRACK 01 MODE2/2352
+                    INDEX 00 00:00:00
+                    INDEX 01 00:02:00
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            spec.image_path,
+            PathBuf::from("/games/sample/Game Disc.bin")
+        );
+        assert_eq!(spec.sector_size, CdromSectorSize::Raw2352);
+        assert_eq!(spec.index01_frames, 150);
+    }
+
+    #[test]
+    fn parses_cue_skipping_audio_track_before_data_track() {
+        let spec = parse_cue_disc_spec(
+            Path::new("disc.cue"),
+            r#"
+                FILE audio.bin BINARY
+                  TRACK 01 AUDIO
+                    INDEX 01 00:00:00
+                FILE data.iso BINARY
+                  TRACK 02 MODE1/2048
+                    INDEX 01 00:00:20
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(spec.image_path, PathBuf::from("data.iso"));
+        assert_eq!(spec.sector_size, CdromSectorSize::Cooked2048);
+        assert_eq!(spec.index01_frames, 20);
+    }
+
+    #[test]
+    fn parses_cue_msf_to_frames() {
+        assert_eq!(parse_cue_msf("00:00:00").unwrap(), 0);
+        assert_eq!(parse_cue_msf("01:02:03").unwrap(), 4653);
+        assert!(parse_cue_msf("00:00:75").is_err());
     }
 }

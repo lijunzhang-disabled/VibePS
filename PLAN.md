@@ -9,7 +9,7 @@
 | Phase 2: BIOS boot | Done | BIOS boot trace CLI, BCC/cache isolation, i-cache fetch model, PS-X EXE loader |
 | Phase 3: DMA + timers + IRQs | Done | DMA modes/channels, GPU linked lists, OTC, DICR/DPCR IRQs, root-counter modes |
 | Phase 4: GPU | Done | GP0/GP1 parser, VRAM transfers, polygons, rectangles, display output |
-| Phase 5: CD-ROM | In progress | Command/status basics, Setloc/ReadN sector reads, cooked ISO/raw BIN data, DMA3 |
+| Phase 5: CD-ROM | In progress | BIOS-facing commands, Setloc/ReadN sector reads, cooked ISO/raw BIN/CUE data, DMA3 |
 | Phase 6: GTE | Pending | COP2 register model and matrix/vector commands |
 | Phase 7: Controllers + memory cards | Pending | JOY serial protocol, digital/analog pads, card EEPROM protocol |
 | Phase 8: SPU | Pending | 24 ADPCM voices, ADSR, pitch, reverb, CD audio mixing |
@@ -63,14 +63,16 @@
 
 1. Implement command/status register basics. In progress: indexed register
    access, response/data FIFOs, interrupt enable/flag handling, `Nop`, `Init`,
-   `Setmode`, `Getparam`, `Setloc`, `ReadN`, `ReadS`, `Pause`, and `GetlocL`
-   are implemented as an immediate deterministic baseline.
+   `Setmode`, `Getparam`, `Setloc`, `ReadN`, `ReadS`, `Pause`, `GetlocL`,
+   `GetlocP`, `GetTN`, `GetTD`, `SeekL`/`SeekP`, `GetID`, `MotorOn`, `Stop`,
+   `Mute`, `Demute`, `Setfilter`, and `ReadTOC` are implemented as an
+   immediate deterministic baseline.
 2. Provide sector data from mounted images. In progress: cooked 2048-byte
-   images and raw 2352-byte images are supported, with raw Mode 2 payloads read
-   from offset 24.
+   images, raw 2352-byte images, and single data-track CUE images are
+   supported, with raw Mode 2 payloads read from offset 24.
 3. Move sectors through DMA3. Done for the immediate DMA path, covered by a
    bus-level test.
-4. Add BIN/CUE track/session parsing, response timing, repeated read cadence,
+4. Add multi-track/session parsing, response timing, repeated read cadence,
    seek latency, error details, and XA/CD-DA behavior. Pending.
 
 ## Phase 5+ Compatibility

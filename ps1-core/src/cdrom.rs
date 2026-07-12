@@ -8,6 +8,7 @@ const INT_ERROR: u8 = 0x05;
 const DRIVE_STATUS_ERROR: u8 = 0x01;
 const DRIVE_STATUS_MOTOR_ON: u8 = 0x02;
 const DRIVE_STATUS_READ: u8 = 0x20;
+const DRIVE_STATUS_SEEK: u8 = 0x40;
 const SECTOR_PREGAP: i32 = 150;
 const COOKED_SECTOR_SIZE: usize = 2048;
 const RAW_SECTOR_SIZE: usize = 2352;
@@ -80,7 +81,12 @@ pub struct Cdrom {
     queued_interrupts: VecDeque<QueuedInterrupt>,
     disc: Option<CdromDisc>,
     loc_lba: u32,
+    seek_lba: u32,
+    filter_file: u8,
+    filter_channel: u8,
+    muted: bool,
     read_active: bool,
+    seek_active: bool,
     last_sector_lba: Option<u32>,
 }
 
@@ -103,7 +109,12 @@ impl Cdrom {
             queued_interrupts: VecDeque::new(),
             disc: None,
             loc_lba: 0,
+            seek_lba: 0,
+            filter_file: 0,
+            filter_channel: 0,
+            muted: false,
             read_active: false,
+            seek_active: false,
             last_sector_lba: None,
         }
     }
@@ -115,7 +126,9 @@ impl Cdrom {
     ) -> Result<(), CdromDiscError> {
         self.disc = Some(CdromDisc::new(bytes, sector_size)?);
         self.loc_lba = 0;
+        self.seek_lba = 0;
         self.read_active = false;
+        self.seek_active = false;
         self.last_sector_lba = None;
         self.data.clear();
         Ok(())
@@ -124,6 +137,7 @@ impl Cdrom {
     pub fn eject_disc(&mut self) {
         self.disc = None;
         self.read_active = false;
+        self.seek_active = false;
         self.data.clear();
         self.last_sector_lba = None;
     }
@@ -198,6 +212,9 @@ impl Cdrom {
         if self.read_active {
             status |= DRIVE_STATUS_READ;
         }
+        if self.seek_active {
+            status |= DRIVE_STATUS_SEEK;
+        }
         status
     }
 
@@ -207,13 +224,24 @@ impl Cdrom {
             0x01 => self.queue_interrupt(INT_ACK, &[self.drive_status()]), // Nop
             0x02 => self.setloc(&params),
             0x06 => self.start_read(), // ReadN
+            0x07 => self.motor_on(),
+            0x08 => self.stop(),
             0x09 => self.pause(),
             0x0a => self.init(),
+            0x0b => self.mute(),
+            0x0c => self.demute(),
+            0x0d => self.setfilter(&params),
             0x0e => self.setmode(&params),
             0x0f => self.getparam(),
             0x10 => self.getloc_l(),
+            0x11 => self.getloc_p(),
+            0x13 => self.gettn(),
+            0x14 => self.gettd(&params),
+            0x15 | 0x16 => self.seek(),
             0x19 => self.queue_interrupt(INT_ACK, &[self.drive_status(), 0, 0, 0, 0]), // Test
-            0x1b => self.start_read(),                                                 // ReadS
+            0x1a => self.getid(),
+            0x1b => self.start_read(), // ReadS
+            0x1e => self.read_toc(),
             _ => self.error_response(),
         }
     }
@@ -228,6 +256,7 @@ impl Cdrom {
         let frame = bcd_to_u8(params[2]) as i32;
         let absolute = ((minute * 60) + second) * 75 + frame;
         self.loc_lba = absolute.saturating_sub(SECTOR_PREGAP) as u32;
+        self.seek_lba = self.loc_lba;
         self.queue_interrupt(INT_ACK, &[self.drive_status()]);
     }
 
@@ -236,9 +265,23 @@ impl Cdrom {
             self.error_response();
             return;
         }
+        self.seek_active = false;
         self.read_active = true;
         self.queue_interrupt(INT_ACK, &[self.drive_status()]);
         self.queue_current_sector();
+    }
+
+    fn motor_on(&mut self) {
+        self.queue_interrupt(INT_ACK, &[self.drive_status()]);
+        self.queue_interrupt(INT_COMPLETE, &[self.drive_status()]);
+    }
+
+    fn stop(&mut self) {
+        self.read_active = false;
+        self.seek_active = false;
+        self.data.clear();
+        self.queue_interrupt(INT_ACK, &[self.drive_status()]);
+        self.queue_interrupt(INT_COMPLETE, &[self.drive_status()]);
     }
 
     fn pause(&mut self) {
@@ -250,7 +293,28 @@ impl Cdrom {
     fn init(&mut self) {
         self.mode = 0;
         self.read_active = false;
+        self.seek_active = false;
         self.data.clear();
+        self.queue_interrupt(INT_ACK, &[self.drive_status()]);
+    }
+
+    fn mute(&mut self) {
+        self.muted = true;
+        self.queue_interrupt(INT_ACK, &[self.drive_status()]);
+    }
+
+    fn demute(&mut self) {
+        self.muted = false;
+        self.queue_interrupt(INT_ACK, &[self.drive_status()]);
+    }
+
+    fn setfilter(&mut self, params: &[u8]) {
+        if params.len() < 2 {
+            self.error_response();
+            return;
+        }
+        self.filter_file = params[0];
+        self.filter_channel = params[1];
         self.queue_interrupt(INT_ACK, &[self.drive_status()]);
     }
 
@@ -264,7 +328,16 @@ impl Cdrom {
     }
 
     fn getparam(&mut self) {
-        self.queue_interrupt(INT_ACK, &[self.drive_status(), self.mode, 0, 0, 0]);
+        self.queue_interrupt(
+            INT_ACK,
+            &[
+                self.drive_status(),
+                self.mode,
+                self.filter_file,
+                self.filter_channel,
+                u8::from(self.muted),
+            ],
+        );
     }
 
     fn getloc_l(&mut self) {
@@ -273,8 +346,93 @@ impl Cdrom {
         self.queue_interrupt(INT_ACK, &[minute, second, frame, 0x02, 0, 0, 0x20, 0]);
     }
 
+    fn getloc_p(&mut self) {
+        let lba = self.last_sector_lba.unwrap_or(self.loc_lba);
+        let [abs_minute, abs_second, abs_frame] = lba_to_bcd_msf(lba);
+        let [rel_minute, rel_second, rel_frame] = lba_to_bcd_msf(lba);
+        self.queue_interrupt(
+            INT_ACK,
+            &[
+                0x01, // track
+                0x01, // index
+                rel_minute, rel_second, rel_frame, abs_minute, abs_second, abs_frame,
+            ],
+        );
+    }
+
+    fn gettn(&mut self) {
+        if self.disc.is_none() {
+            self.error_response();
+            return;
+        }
+        self.queue_interrupt(INT_ACK, &[self.drive_status(), 0x01, 0x01]);
+    }
+
+    fn gettd(&mut self, params: &[u8]) {
+        let Some(disc) = self.disc.as_ref() else {
+            self.error_response();
+            return;
+        };
+        let track = params.first().copied().unwrap_or(0);
+        let lba = match track {
+            0x00 => disc.sector_count() as u32,
+            0x01 => 0,
+            _ => {
+                self.error_response();
+                return;
+            }
+        };
+        let [minute, second, frame] = lba_to_bcd_msf(lba);
+        self.queue_interrupt(INT_ACK, &[self.drive_status(), minute, second, frame]);
+    }
+
+    fn seek(&mut self) {
+        if self.disc.is_none() {
+            self.error_response();
+            return;
+        }
+        self.read_active = false;
+        self.seek_active = true;
+        self.data.clear();
+        self.seek_lba = self.loc_lba;
+        self.queue_interrupt(INT_ACK, &[self.drive_status()]);
+        self.seek_active = false;
+        self.queue_interrupt(INT_COMPLETE, &[self.drive_status()]);
+    }
+
+    fn getid(&mut self) {
+        if self.disc.is_none() {
+            self.error_response();
+            return;
+        }
+        self.queue_interrupt(INT_ACK, &[self.drive_status()]);
+        self.queue_interrupt(
+            INT_COMPLETE,
+            &[
+                self.drive_status(),
+                0x00,
+                0x20,
+                0x00,
+                b'S',
+                b'C',
+                b'E',
+                b'A',
+            ],
+        );
+    }
+
+    fn read_toc(&mut self) {
+        if self.disc.is_none() {
+            self.error_response();
+            return;
+        }
+        self.queue_interrupt(INT_ACK, &[self.drive_status()]);
+        self.queue_interrupt(INT_COMPLETE, &[self.drive_status()]);
+    }
+
     fn error_response(&mut self) {
         self.read_active = false;
+        self.seek_active = false;
         self.queue_interrupt(INT_ERROR, &[self.drive_status() | DRIVE_STATUS_ERROR, 0x80]);
     }
 
@@ -433,6 +591,101 @@ mod tests {
 
         assert_eq!(cdrom.read8(2), 0x11);
         assert_eq!(cdrom.read8(2), 0x22);
+    }
+
+    #[test]
+    fn gettn_and_gettd_report_single_data_track_and_leadout() {
+        let mut cdrom = Cdrom::new();
+        cdrom
+            .load_disc_image(cooked_disc(10), CdromSectorSize::Cooked2048)
+            .unwrap();
+
+        command_with_params(&mut cdrom, 0x13, &[]);
+
+        assert_eq!(cdrom.read8(1), 0x02);
+        assert_eq!(cdrom.read8(1), 0x01);
+        assert_eq!(cdrom.read8(1), 0x01);
+        ack(&mut cdrom);
+
+        command_with_params(&mut cdrom, 0x14, &[0x01]);
+
+        assert_eq!(cdrom.read8(1), 0x02);
+        assert_eq!(cdrom.read8(1), 0x00);
+        assert_eq!(cdrom.read8(1), 0x02);
+        assert_eq!(cdrom.read8(1), 0x00);
+        ack(&mut cdrom);
+
+        command_with_params(&mut cdrom, 0x14, &[0x00]);
+
+        assert_eq!(cdrom.read8(1), 0x02);
+        assert_eq!(cdrom.read8(1), 0x00);
+        assert_eq!(cdrom.read8(1), 0x02);
+        assert_eq!(cdrom.read8(1), 0x10);
+    }
+
+    #[test]
+    fn getid_returns_licensed_disc_identity_after_ack() {
+        let mut cdrom = Cdrom::new();
+        cdrom
+            .load_disc_image(cooked_disc(1), CdromSectorSize::Cooked2048)
+            .unwrap();
+
+        command_with_params(&mut cdrom, 0x1a, &[]);
+
+        assert_eq!(interrupt_flags(&mut cdrom) & 0x7, 0x3);
+        assert_eq!(cdrom.read8(1), 0x02);
+        ack(&mut cdrom);
+        assert_eq!(interrupt_flags(&mut cdrom) & 0x7, 0x2);
+        assert_eq!(cdrom.read8(1), 0x02);
+        assert_eq!(cdrom.read8(1), 0x00);
+        assert_eq!(cdrom.read8(1), 0x20);
+        assert_eq!(cdrom.read8(1), 0x00);
+        assert_eq!(cdrom.read8(1), b'S');
+        assert_eq!(cdrom.read8(1), b'C');
+        assert_eq!(cdrom.read8(1), b'E');
+        assert_eq!(cdrom.read8(1), b'A');
+    }
+
+    #[test]
+    fn seek_and_read_toc_emit_ack_then_complete() {
+        let mut cdrom = Cdrom::new();
+        cdrom
+            .load_disc_image(cooked_disc(1), CdromSectorSize::Cooked2048)
+            .unwrap();
+
+        command_with_params(&mut cdrom, 0x15, &[]);
+
+        assert_eq!(interrupt_flags(&mut cdrom) & 0x7, 0x3);
+        assert_eq!(cdrom.read8(1), 0x42);
+        ack(&mut cdrom);
+        assert_eq!(interrupt_flags(&mut cdrom) & 0x7, 0x2);
+        assert_eq!(cdrom.read8(1), 0x02);
+        ack(&mut cdrom);
+
+        command_with_params(&mut cdrom, 0x1e, &[]);
+
+        assert_eq!(interrupt_flags(&mut cdrom) & 0x7, 0x3);
+        assert_eq!(cdrom.read8(1), 0x02);
+        ack(&mut cdrom);
+        assert_eq!(interrupt_flags(&mut cdrom) & 0x7, 0x2);
+        assert_eq!(cdrom.read8(1), 0x02);
+    }
+
+    #[test]
+    fn setfilter_and_mute_are_visible_through_getparam() {
+        let mut cdrom = Cdrom::new();
+
+        command_with_params(&mut cdrom, 0x0d, &[0x05, 0x07]);
+        ack(&mut cdrom);
+        command_with_params(&mut cdrom, 0x0b, &[]);
+        ack(&mut cdrom);
+        command_with_params(&mut cdrom, 0x0f, &[]);
+
+        assert_eq!(cdrom.read8(1), 0x02);
+        assert_eq!(cdrom.read8(1), 0x00);
+        assert_eq!(cdrom.read8(1), 0x05);
+        assert_eq!(cdrom.read8(1), 0x07);
+        assert_eq!(cdrom.read8(1), 0x01);
     }
 
     #[test]

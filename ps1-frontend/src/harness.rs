@@ -299,9 +299,10 @@ fn parse_cue_disc_spec(cue_path: &Path, text: &str) -> Result<CueDiscSpec, Strin
     let mut current_file: Option<PathBuf> = None;
     let mut selected: Option<CueDiscSpec> = None;
     let mut selected_track_open = false;
+    let mut selected_has_index01 = false;
 
     for line in text.lines().map(str::trim) {
-        if line.is_empty() || cue_keyword_is(line, "REM") {
+        if cue_line_is_ignored(line) {
             continue;
         }
         if let Some(file_path) = parse_cue_file_path(line) {
@@ -330,6 +331,7 @@ fn parse_cue_disc_spec(cue_path: &Path, text: &str) -> Result<CueDiscSpec, Strin
                 index01_frames: 0,
             });
             selected_track_open = true;
+            selected_has_index01 = false;
             continue;
         }
         if selected_track_open {
@@ -337,12 +339,18 @@ fn parse_cue_disc_spec(cue_path: &Path, text: &str) -> Result<CueDiscSpec, Strin
                 if let Some(spec) = selected.as_mut() {
                     spec.index01_frames = index01_frames;
                 }
+                selected_has_index01 = true;
                 selected_track_open = false;
             }
         }
     }
 
-    selected.ok_or_else(|| "CUE does not contain a supported data track".to_string())
+    let selected =
+        selected.ok_or_else(|| "CUE does not contain a supported data track".to_string())?;
+    if !selected_has_index01 {
+        return Err("CUE data track is missing INDEX 01".to_string());
+    }
+    Ok(selected)
 }
 
 fn parse_cue_file_path(line: &str) -> Option<String> {
@@ -359,7 +367,14 @@ fn parse_cue_track_mode(line: &str) -> Option<&str> {
     if !cue_keyword_is(line, "TRACK") {
         return None;
     }
-    line.split_whitespace().nth(2)
+    let mut parts = line.split_whitespace();
+    let _keyword = parts.next()?;
+    let track_or_mode = parts.next()?;
+    if track_or_mode.parse::<u8>().is_ok() {
+        parts.next()
+    } else {
+        Some(track_or_mode)
+    }
 }
 
 fn parse_cue_index01(line: &str) -> Result<Option<usize>, String> {
@@ -406,9 +421,20 @@ fn parse_cue_msf(value: &str) -> Result<usize, String> {
 fn cue_track_sector_size(mode: &str) -> Option<CdromSectorSize> {
     match mode.to_ascii_uppercase().as_str() {
         "MODE1/2048" | "MODE2/2048" => Some(CdromSectorSize::Cooked2048),
-        "MODE1/2352" | "MODE2/2352" | "CDI/2352" => Some(CdromSectorSize::Raw2352),
+        "MODE1/2352" | "MODE2/2352" | "MODE1_RAW" | "MODE2_RAW" | "CDI/2352" => {
+            Some(CdromSectorSize::Raw2352)
+        }
         _ => None,
     }
+}
+
+fn cue_line_is_ignored(line: &str) -> bool {
+    line.is_empty()
+        || line.starts_with(';')
+        || line.starts_with("//")
+        || cue_keyword_is(line, "REM")
+        || cue_keyword_is(line, "CD_ROM")
+        || cue_keyword_is(line, "CD_ROM_XA")
 }
 
 fn cue_keyword_is(line: &str, keyword: &str) -> bool {
@@ -521,11 +547,13 @@ fn usage_and_exit() -> ! {
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_disc_sector_size, parse_addr_value, parse_cue_disc_spec, parse_cue_msf,
-        parse_disc_sector_size, parse_reg, parse_reg_value, parse_u32,
+        detect_disc_sector_size, load_disc_image, parse_addr_value, parse_cue_disc_spec,
+        parse_cue_msf, parse_disc_sector_size, parse_reg, parse_reg_value, parse_u32,
     };
     use ps1_core::cdrom::CdromSectorSize;
+    use std::fs;
     use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn parses_test_runner_cli_values() {
@@ -560,6 +588,10 @@ mod tests {
         );
         assert_eq!(
             detect_disc_sector_size(Path::new("game.bin"), 2352 * 16),
+            CdromSectorSize::Raw2352
+        );
+        assert_eq!(
+            detect_disc_sector_size(Path::new("raw-dump.iso"), 2352 * 16),
             CdromSectorSize::Raw2352
         );
     }
@@ -607,9 +639,127 @@ mod tests {
     }
 
     #[test]
+    fn parses_cue_comments_whitespace_and_raw_mode_alias() {
+        let spec = parse_cue_disc_spec(
+            Path::new("disc.cue"),
+            r#"
+                REM primary comment
+                ; secondary comment
+                // cdrdao-style comment
+                CD_ROM_XA
+                   FILE    "game.bin"    BINARY
+
+                  TRACK MODE1_RAW
+                    INDEX    01    00:00:00
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(spec.image_path, PathBuf::from("game.bin"));
+        assert_eq!(spec.sector_size, CdromSectorSize::Raw2352);
+        assert_eq!(spec.index01_frames, 0);
+    }
+
+    #[test]
+    fn rejects_cue_data_track_without_index01() {
+        let err = parse_cue_disc_spec(
+            Path::new("disc.cue"),
+            r#"
+                FILE "game.bin" BINARY
+                  TRACK 01 MODE2/2352
+                    INDEX 00 00:00:00
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("INDEX 01"));
+    }
+
+    #[test]
+    fn rejects_cue_track_before_file() {
+        let err = parse_cue_disc_spec(
+            Path::new("disc.cue"),
+            r#"
+                TRACK 01 MODE1/2048
+                  INDEX 01 00:00:00
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("before FILE"));
+    }
+
+    #[test]
+    fn load_disc_image_mounts_cue_and_applies_index_offset() {
+        let dir = TempDir::new("ps1-cue-load");
+        let bin = dir.path().join("disc.bin");
+        let cue = dir.path().join("disc.cue");
+        let mut image = vec![0xaa; 2048];
+        image.extend(vec![0x11; 2048]);
+        image.extend(vec![0x22; 2048]);
+        fs::write(&bin, image).unwrap();
+        fs::write(
+            &cue,
+            "FILE \"disc.bin\" BINARY\nTRACK 01 MODE1/2048\nINDEX 01 00:00:01\n",
+        )
+        .unwrap();
+
+        let (loaded, sector_size) = load_disc_image(&cue, None).unwrap();
+
+        assert_eq!(sector_size, CdromSectorSize::Cooked2048);
+        assert_eq!(loaded.len(), 2048 * 2);
+        assert_eq!(loaded[0], 0x11);
+        assert_eq!(loaded[2048], 0x22);
+    }
+
+    #[test]
+    fn load_disc_image_rejects_cue_index_past_image() {
+        let dir = TempDir::new("ps1-cue-short");
+        let bin = dir.path().join("disc.bin");
+        let cue = dir.path().join("disc.cue");
+        fs::write(&bin, vec![0; 2048]).unwrap();
+        fs::write(
+            &cue,
+            "FILE \"disc.bin\" BINARY\nTRACK 01 MODE1/2048\nINDEX 01 00:00:02\n",
+        )
+        .unwrap();
+
+        let err = load_disc_image(&cue, None).unwrap_err();
+
+        assert!(err.contains("offset exceeds image length"));
+    }
+
+    #[test]
     fn parses_cue_msf_to_frames() {
         assert_eq!(parse_cue_msf("00:00:00").unwrap(), 0);
         assert_eq!(parse_cue_msf("01:02:03").unwrap(), 4653);
         assert!(parse_cue_msf("00:00:75").is_err());
+    }
+
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new(prefix: &str) -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path =
+                std::env::temp_dir().join(format!("{prefix}-{}-{unique}", std::process::id()));
+            fs::create_dir(&path).unwrap();
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
     }
 }

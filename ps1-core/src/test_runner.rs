@@ -266,9 +266,12 @@ mod tests {
         Exception, PsxExeExitCodeSource, PsxExePassCondition, PsxExeRunStatus, PsxExeStopCondition,
         PsxExeStopReason, PsxExeTestConfig, PsxExeTestRunner,
     };
+    use crate::cdrom::CdromSectorSize;
 
     const LOAD_ADDR: u32 = 0x8001_0000;
     const MAILBOX: u32 = 0x8001_0100;
+    const CDROM_MAILBOX: u32 = 0x8001_4000;
+    const CDROM_DMA_BUFFER: u32 = 0x8001_4400;
 
     #[test]
     fn mailbox_runner_passes_when_guest_writes_expected_code() {
@@ -362,6 +365,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn psx_exe_runner_executes_cdrom_command_and_dma_smoke_test() {
+        let exe = psx_exe(&cdrom_guest_smoke_program());
+        let mut runner = PsxExeTestRunner::new(
+            None,
+            &exe,
+            PsxExeTestConfig::new()
+                .with_max_steps(512)
+                .with_mailbox32(CDROM_MAILBOX, 1),
+        )
+        .unwrap();
+        runner
+            .ps1_mut()
+            .bus
+            .cdrom
+            .load_disc_image(cooked_disc(2), CdromSectorSize::Cooked2048)
+            .unwrap();
+
+        let report = runner.run();
+
+        assert_eq!(report.status, PsxExeRunStatus::Passed, "{report:?}");
+        assert_eq!(report.exit_code, Some(1));
+        assert_eq!(runner.ps1().bus.peek32(CDROM_DMA_BUFFER), 0x0302_0100);
+        assert_eq!(runner.ps1().bus.peek32(CDROM_DMA_BUFFER + 4), 0x0706_0504);
+    }
+
     fn mailbox_program(value: u32) -> Vec<u32> {
         vec![
             lui(8, (MAILBOX >> 16) as u16),
@@ -375,6 +404,137 @@ mod tests {
 
     fn self_loop_program() -> Vec<u32> {
         vec![j(LOAD_ADDR), 0]
+    }
+
+    fn cdrom_guest_smoke_program() -> Vec<u32> {
+        let mut words = Vec::new();
+        push_li(&mut words, 8, 0x1f80_1800); // CD-ROM register base
+        push_li(&mut words, 9, CDROM_MAILBOX);
+        push_li(&mut words, 10, CDROM_DMA_BUFFER);
+        push_li(&mut words, 13, 0x1f80_1000); // DMA register base
+
+        cdrom_command(&mut words, 0x13, &[]); // GetTN
+        cdrom_expect_flags(&mut words, 0x03, 0x101);
+        cdrom_expect_response(&mut words, 0x02, 0x102);
+        cdrom_expect_response(&mut words, 0x01, 0x103);
+        cdrom_expect_response(&mut words, 0x01, 0x104);
+        cdrom_ack(&mut words);
+
+        cdrom_command(&mut words, 0x14, &[0x01]); // GetTD track 1
+        cdrom_expect_flags(&mut words, 0x03, 0x111);
+        cdrom_expect_response(&mut words, 0x02, 0x112);
+        cdrom_expect_response(&mut words, 0x00, 0x113);
+        cdrom_expect_response(&mut words, 0x02, 0x114);
+        cdrom_expect_response(&mut words, 0x00, 0x115);
+        cdrom_ack(&mut words);
+
+        cdrom_command(&mut words, 0x0e, &[0x80]); // Setmode
+        cdrom_expect_flags(&mut words, 0x03, 0x121);
+        cdrom_expect_response(&mut words, 0x02, 0x122);
+        cdrom_ack(&mut words);
+
+        cdrom_command(&mut words, 0x0f, &[]); // Getparam
+        cdrom_expect_flags(&mut words, 0x03, 0x123);
+        cdrom_expect_response(&mut words, 0x02, 0x124);
+        cdrom_expect_response(&mut words, 0x80, 0x125);
+        cdrom_expect_response(&mut words, 0x00, 0x126);
+        cdrom_expect_response(&mut words, 0x00, 0x127);
+        cdrom_expect_response(&mut words, 0x00, 0x128);
+        cdrom_ack(&mut words);
+
+        cdrom_command(&mut words, 0x02, &[0x00, 0x02, 0x00]); // Setloc LBA 0
+        cdrom_expect_flags(&mut words, 0x03, 0x131);
+        cdrom_expect_response(&mut words, 0x02, 0x132);
+        cdrom_ack(&mut words);
+
+        cdrom_command(&mut words, 0x06, &[]); // ReadN
+        cdrom_expect_flags(&mut words, 0x03, 0x133);
+        cdrom_expect_response(&mut words, 0x22, 0x134);
+        cdrom_ack(&mut words);
+        cdrom_expect_flags(&mut words, 0x01, 0x135);
+        cdrom_expect_response(&mut words, 0x22, 0x136);
+
+        push_li(&mut words, 11, 1 << 15);
+        words.push(sw(11, 13, 0x00f0)); // DPCR: enable DMA3
+        push_li(&mut words, 11, CDROM_DMA_BUFFER & 0x001f_fffc);
+        words.push(sw(11, 13, 0x00b0)); // D3_MADR
+        push_li(&mut words, 11, (1 << 16) | 2);
+        words.push(sw(11, 13, 0x00b4)); // D3_BCR: two words
+        push_li(&mut words, 11, 0x0100_0200);
+        words.push(sw(11, 13, 0x00b8)); // D3_CHCR: from CD-ROM to RAM
+
+        words.push(lw(11, 10, 0));
+        words.push(nop());
+        assert_reg_eq(&mut words, 11, 0x0302_0100, 0x141);
+        words.push(lw(11, 10, 4));
+        words.push(nop());
+        assert_reg_eq(&mut words, 11, 0x0706_0504, 0x142);
+
+        push_li(&mut words, 11, 1);
+        words.push(sw(11, 9, 0));
+        words
+    }
+
+    fn cdrom_command(words: &mut Vec<u32>, command: u8, params: &[u8]) {
+        words.push(sb(0, 8, 0));
+        for param in params {
+            push_li(words, 11, *param as u32);
+            words.push(sb(11, 8, 2));
+        }
+        push_li(words, 11, command as u32);
+        words.push(sb(11, 8, 1));
+    }
+
+    fn cdrom_expect_flags(words: &mut Vec<u32>, expected: u32, failure: u32) {
+        push_li(words, 11, 1);
+        words.push(sb(11, 8, 0));
+        words.push(lbu(11, 8, 3));
+        words.push(nop());
+        assert_reg_eq(words, 11, expected, failure);
+    }
+
+    fn cdrom_expect_response(words: &mut Vec<u32>, expected: u32, failure: u32) {
+        words.push(lbu(11, 8, 1));
+        words.push(nop());
+        assert_reg_eq(words, 11, expected, failure);
+    }
+
+    fn cdrom_ack(words: &mut Vec<u32>) {
+        push_li(words, 11, 1);
+        words.push(sb(11, 8, 0));
+        push_li(words, 11, 0x1f);
+        words.push(sb(11, 8, 3));
+        words.push(sb(0, 8, 0));
+    }
+
+    fn assert_reg_eq(words: &mut Vec<u32>, reg: u32, expected: u32, failure: u32) {
+        push_li(words, 12, expected);
+        words.push(beq(reg, 12, 3));
+        words.push(nop());
+        push_li(words, 12, failure);
+        words.push(sw(12, 9, 0));
+    }
+
+    fn push_li(words: &mut Vec<u32>, reg: u32, value: u32) {
+        if value <= 0xffff {
+            words.push(ori(reg, 0, value as u16));
+            return;
+        }
+        words.push(lui(reg, (value >> 16) as u16));
+        let low = value as u16;
+        if low != 0 {
+            words.push(ori(reg, reg, low));
+        }
+    }
+
+    fn cooked_disc(sectors: usize) -> Vec<u8> {
+        let mut disc = vec![0; sectors * 2048];
+        for sector in 0..sectors {
+            for offset in 0..2048 {
+                disc[sector * 2048 + offset] = offset as u8;
+            }
+        }
+        disc
     }
 
     fn psx_exe(words: &[u32]) -> Vec<u8> {
@@ -414,8 +574,28 @@ mod tests {
         (0x2b << 26) | (rs << 21) | (rt << 16) | imm as u16 as u32
     }
 
+    fn lw(rt: u32, rs: u32, imm: i16) -> u32 {
+        (0x23 << 26) | (rs << 21) | (rt << 16) | imm as u16 as u32
+    }
+
+    fn lbu(rt: u32, rs: u32, imm: i16) -> u32 {
+        (0x24 << 26) | (rs << 21) | (rt << 16) | imm as u16 as u32
+    }
+
+    fn sb(rt: u32, rs: u32, imm: i16) -> u32 {
+        (0x28 << 26) | (rs << 21) | (rt << 16) | imm as u16 as u32
+    }
+
+    fn beq(rs: u32, rt: u32, imm: i16) -> u32 {
+        (0x04 << 26) | (rs << 21) | (rt << 16) | imm as u16 as u32
+    }
+
     fn j(target: u32) -> u32 {
         (0x02 << 26) | ((target >> 2) & 0x03ff_ffff)
+    }
+
+    fn nop() -> u32 {
+        0
     }
 
     fn break_() -> u32 {

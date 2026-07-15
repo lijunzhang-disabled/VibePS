@@ -50,6 +50,7 @@ const FN_NCCT: u32 = 0x3f;
 pub struct Gte {
     data: [u32; 32],
     control: [u32; 32],
+    busy_cycles: u32,
 }
 
 impl Gte {
@@ -57,12 +58,14 @@ impl Gte {
         Self {
             data: [0; 32],
             control: [0; 32],
+            busy_cycles: 0,
         }
     }
 
     pub fn reset(&mut self) {
         self.data = [0; 32];
         self.control = [0; 32];
+        self.busy_cycles = 0;
     }
 
     pub fn read_data(&self, index: usize) -> u32 {
@@ -103,6 +106,7 @@ impl Gte {
     }
 
     pub fn execute_command(&mut self, opcode: u32) {
+        self.busy_cycles = command_cycles(opcode);
         self.control[31] = 0;
         match opcode & 0x3f {
             FN_RTPS => self.rtps(opcode),
@@ -129,6 +133,18 @@ impl Gte {
             FN_NCCT => self.ncct(opcode),
             _ => {}
         }
+    }
+
+    pub fn tick(&mut self, cycles: u32) {
+        self.busy_cycles = self.busy_cycles.saturating_sub(cycles);
+    }
+
+    pub fn take_busy_cycles(&mut self) -> u32 {
+        std::mem::take(&mut self.busy_cycles)
+    }
+
+    pub fn busy_cycles(&self) -> u32 {
+        self.busy_cycles
     }
 
     fn rtps(&mut self, opcode: u32) {
@@ -616,12 +632,23 @@ impl Gte {
         clamped as u32
     }
 
-    fn divide(&mut self, h: i64, sz3: u32) -> u32 {
-        if sz3 == 0 || h >= (sz3 as i64 * 2) {
+    fn divide(&mut self, h: u32, sz3: u32) -> u32 {
+        if sz3 == 0 || h >= sz3 * 2 {
             self.set_flag(FLAG_DIV_OVERFLOW);
             0x1ffff
         } else {
-            ((h << 16) / sz3 as i64).clamp(0, 0x1ffff) as u32
+            let shift = sz3.leading_zeros() - 16;
+            let numerator = (h as u64) << shift;
+            let mut divisor = (sz3 as u64) << shift;
+            let table_index = ((divisor - 0x7fc0) >> 7) as u32;
+            let table_value = (0x40000u32 / (table_index + 0x100))
+                .div_ceil(2)
+                .saturating_sub(0x101) as u64;
+            let reciprocal = table_value + 0x101;
+
+            divisor = (0x2000080 - divisor * reciprocal) >> 8;
+            divisor = (0x80 + divisor * reciprocal) >> 8;
+            (((numerator * divisor + 0x8000) >> 16).min(0x1ffff)) as u32
         }
     }
 
@@ -679,8 +706,8 @@ impl Gte {
         (self.data[6] >> 24) & 0xff
     }
 
-    fn h(&self) -> i64 {
-        self.control[26] as i32 as i64
+    fn h(&self) -> u32 {
+        self.control[26] & 0xffff
     }
 
     fn sxy(&self, index: usize) -> [i64; 2] {
@@ -737,6 +764,28 @@ fn limit_mode(opcode: u32) -> bool {
     ((opcode >> 10) & 1) != 0
 }
 
+fn command_cycles(opcode: u32) -> u32 {
+    match opcode & 0x3f {
+        FN_RTPS => 15,
+        FN_NCLIP => 8,
+        FN_OP => 6,
+        FN_DPCS | FN_INTPL | FN_MVMVA | FN_DCPL => 8,
+        FN_NCDS => 19,
+        FN_CDP => 13,
+        FN_NCDT => 44,
+        FN_NCCS => 17,
+        FN_CC => 11,
+        FN_NCS => 14,
+        FN_NCT => 30,
+        FN_SQR | FN_AVSZ3 | FN_GPF | FN_GPL => 5,
+        FN_DPCT => 17,
+        FN_AVSZ4 => 6,
+        FN_RTPT => 23,
+        FN_NCCT => 39,
+        _ => 0,
+    }
+}
+
 fn shift_by_sf(value: i64, sf: bool) -> i64 {
     if sf {
         value >> 12
@@ -767,7 +816,7 @@ fn color_components(value: u32) -> [i64; 3] {
 
 #[cfg(test)]
 mod tests {
-    use super::{Gte, FLAG_ERROR};
+    use super::{command_cycles, Gte, FLAG_DIV_OVERFLOW, FLAG_ERROR};
 
     const FN_RTPS: u32 = 0x01;
     const FN_NCLIP: u32 = 0x06;
@@ -848,6 +897,69 @@ mod tests {
             gte.write_control(index, 0x8000);
             assert_eq!(gte.read_control(index), 0xffff_8000);
         }
+    }
+
+    #[test]
+    fn projection_divider_uses_unsigned_h_and_unr_approximation() {
+        let mut gte = Gte::new();
+        gte.write_control(26, 0xffff);
+
+        assert_eq!(gte.read_control(26), 0xffff_ffff);
+        assert_eq!(gte.h(), 0xffff);
+        assert_eq!(gte.divide(gte.h(), 0xffff), 0xffff);
+
+        // This differs by one from rounded integer division and exposes the
+        // approximation used by the hardware reciprocal table.
+        assert_eq!(gte.divide(0x000d, 0x0012), 0xb8e3);
+        assert_eq!(gte.read_control(31) & FLAG_DIV_OVERFLOW, 0);
+
+        // The result can saturate without reporting division overflow.
+        assert_eq!(gte.divide(0xfe3f, 0x7f20), 0x1ffff);
+        assert_eq!(gte.read_control(31) & FLAG_DIV_OVERFLOW, 0);
+
+        assert_eq!(gte.divide(0x0100, 0x0080), 0x1ffff);
+        assert_ne!(gte.read_control(31) & FLAG_DIV_OVERFLOW, 0);
+    }
+
+    #[test]
+    fn documented_commands_report_hardware_latency() {
+        let expected = [
+            (0x01, 15),
+            (0x06, 8),
+            (0x0c, 6),
+            (0x10, 8),
+            (0x11, 8),
+            (0x12, 8),
+            (0x13, 19),
+            (0x14, 13),
+            (0x16, 44),
+            (0x1b, 17),
+            (0x1c, 11),
+            (0x1e, 14),
+            (0x20, 30),
+            (0x28, 5),
+            (0x29, 8),
+            (0x2a, 17),
+            (0x2d, 5),
+            (0x2e, 6),
+            (0x30, 23),
+            (0x3d, 5),
+            (0x3e, 5),
+            (0x3f, 39),
+        ];
+
+        for (function, cycles) in expected {
+            assert_eq!(command_cycles(function), cycles);
+        }
+        assert_eq!(command_cycles(0), 0);
+
+        let mut gte = Gte::new();
+        gte.execute_command(FN_RTPS);
+        assert_eq!(gte.busy_cycles(), 15);
+        gte.tick(2);
+        assert_eq!(gte.busy_cycles(), 13);
+        assert_eq!(gte.take_busy_cycles(), 13);
+        assert_eq!(gte.busy_cycles(), 0);
     }
 
     #[test]

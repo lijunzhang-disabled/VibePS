@@ -10,7 +10,7 @@
 | Phase 3: DMA + timers + IRQs | Done | DMA modes/channels, GPU linked lists, OTC, DICR/DPCR IRQs, root-counter modes |
 | Phase 4: GPU | Done | GP0/GP1 parser, VRAM transfers, polygons, rectangles, display output |
 | Phase 5: CD-ROM | In progress | BIOS-facing commands, Setloc/ReadN sector reads, cooked ISO/raw BIN/CUE data, DMA3 |
-| Phase 6: GTE | In progress | COP2 register model and documented-command execution baseline |
+| Phase 6: GTE | In progress | COP2 registers/commands, UNR projection divider, command interlocks |
 | Phase 7: Controllers + memory cards | Pending | JOY serial protocol, digital/analog pads, card EEPROM protocol |
 | Phase 8: SPU | Pending | 24 ADPCM voices, ADSR, pitch, reverb, CD audio mixing |
 | Phase 9: MDEC + compatibility | Pending | FMV decode path, game-focused bug fixing, save states |
@@ -82,14 +82,17 @@
    pushes, `IRGB`/`ORGB`, `LZCS`/`LZCR`, and `FLAG` summary bits.
 2. Execute geometry and depth commands. Done for the baseline: `RTPS`, `RTPT`,
    `NCLIP`, `AVSZ3`, `AVSZ4`, and `MVMVA` are covered by native tests and one
-   CPU-level COP2 dispatch test.
+   CPU-level COP2 dispatch test. Projection now uses the unsigned `H` input and
+   the hardware UNR reciprocal approximation.
 3. Implement the remaining GTE arithmetic and color/lighting commands. Done for
    the baseline: `SQR`, `OP`, `GPF`, `GPL`, `DPCS`, `DPCT`, `DCPL`, `INTPL`,
    `NCS`, `NCT`, `NCCS`, `NCCT`, `NCDS`, `NCDT`, `CC`, and `CDP` execute
    through shared MAC/IR/color FIFO helpers.
-4. Add edge-case compatibility. In progress: `MVMVA` `mx=3` and `cv=2` are
-   covered; exact divider/table behavior, remaining saturation corner cases,
-   command latency, CPU stalls, and register load timing are pending.
+4. Add edge-case compatibility. In progress: `MVMVA` `mx=3` and `cv=2`, exact
+   UNR divider behavior, documented command latencies, dependent CPU stalls,
+   overlapping CPU work, and `BC2F`/`BC2T` behavior are covered. Remaining
+   saturation/overflow corner cases, per-register pipeline hazards, and
+   hardware/reference-emulator comparisons are pending.
 
 ## Phase 5+ Compatibility
 

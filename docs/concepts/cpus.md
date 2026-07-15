@@ -11,12 +11,14 @@ The first emulator target is instruction correctness:
 - One-instruction load delay
 - COP0 status/cause/EPC behavior
 - COP0 interrupt delivery from `SR.IM & Cause.IP`
-- GTE register transfers and documented-command baseline execution
+- GTE register transfers, documented commands, and command busy interlocks
 - `SR.IsC` isolated-cache behavior for BIOS cache flush loops
 - Instruction bus errors, data bus errors, and cached KUSEG/KSEG0 fetches
 
-Cycle accuracy comes later. The initial interpreter uses a fixed instruction
-cost so BIOS and test-program control flow can be debugged first.
+The interpreter still uses a fixed base instruction cost. GTE commands are the
+first variable timing path: independent CPU work overlaps their documented
+latency, while result reads and later commands consume the remaining stall.
+General bus and cache cycle accuracy comes later.
 
 The BIU/cache-control register at `0xFFFE0130` is modeled as bus state. When
 COP0 `SR.IsC` is set, data loads and stores are redirected to a small isolated

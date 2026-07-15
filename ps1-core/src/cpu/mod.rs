@@ -75,6 +75,7 @@ impl Cpu {
             self.in_delay_slot_branch_taken = self.next_delay_slot_branch_taken;
             self.in_delay_slot_branch_target = self.next_delay_slot_branch_target;
             self.raise_exception(Exception::Interrupt, self.pc, None, None);
+            self.gte.tick(2);
             return 2;
         }
 
@@ -84,6 +85,7 @@ impl Cpu {
             self.in_delay_slot_branch_taken = self.next_delay_slot_branch_taken;
             self.in_delay_slot_branch_target = self.next_delay_slot_branch_target;
             self.raise_exception(Exception::AddressLoad, pc, Some(pc), None);
+            self.gte.tick(2);
             return 2;
         }
 
@@ -95,8 +97,14 @@ impl Cpu {
                 self.in_delay_slot_branch_taken = self.next_delay_slot_branch_taken;
                 self.in_delay_slot_branch_target = self.next_delay_slot_branch_target;
                 self.raise_exception(Exception::InstructionBusError, pc, None, None);
+                self.gte.tick(2);
                 return 2;
             }
+        };
+        let gte_stall = if instruction_waits_for_gte(opcode) {
+            self.gte.take_busy_cycles()
+        } else {
+            0
         };
         let delayed_load = self.load_delay.take();
         self.load_delay_merge = delayed_load;
@@ -129,7 +137,8 @@ impl Cpu {
         self.in_delay_slot = false;
         self.in_delay_slot_branch_taken = false;
         self.in_delay_slot_branch_target = 0;
-        2
+        self.gte.tick(2);
+        2 + gte_stall
     }
 
     fn execute(&mut self, opcode: u32, bus: &mut Bus, pc: u32) {
@@ -272,6 +281,11 @@ impl Cpu {
             0x02 => self.set_load(rt(opcode), self.gte.read_control(rd(opcode))),
             0x04 => self.gte.write_data(rd(opcode), self.reg(rt(opcode))),
             0x06 => self.gte.write_control(rd(opcode), self.reg(rt(opcode))),
+            0x08 => match rt(opcode) {
+                0 => self.branch(true, opcode, pc),
+                1 => self.branch(false, opcode, pc),
+                _ => self.raise_exception(Exception::ReservedInstruction, pc, None, None),
+            },
             0x10..=0x1f => self.gte.execute_command(opcode),
             _ => self.raise_exception(Exception::CoprocessorUnusable, pc, None, Some(2)),
         }
@@ -712,6 +726,14 @@ fn add_overflow(a: u32, b: u32, result: u32) -> bool {
     ((a ^ result) & (b ^ result) & 0x8000_0000) != 0
 }
 
+fn instruction_waits_for_gte(opcode: u32) -> bool {
+    match opcode >> 26 {
+        0x12 => matches!(rs(opcode), 0x00 | 0x02 | 0x10..=0x1f),
+        0x3a => true,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -742,6 +764,10 @@ mod tests {
 
     fn cop2_command(command: u32) -> u32 {
         (0x12 << 26) | (1 << 25) | command
+    }
+
+    fn bc2(true_branch: bool, offset: i16) -> u32 {
+        (0x12 << 26) | (0x08 << 21) | ((true_branch as u32) << 16) | offset as u16 as u32
     }
 
     fn gte_op(sf: u32, mx: u32, v: u32, cv: u32, lm: u32, function: u32) -> u32 {
@@ -811,6 +837,145 @@ mod tests {
 
         assert_eq!(cpu.gte.read_data(19), 1000);
         assert_eq!(cpu.gte.read_data(14), (120 << 16) | 160);
+    }
+
+    #[test]
+    fn gte_result_reads_stall_until_command_completion() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(None);
+        cpu.set_pc(0x8000_0000);
+        cpu.gte.write_data(12, 0x0000_0000);
+        cpu.gte.write_data(13, 0x0000_0064);
+        cpu.gte.write_data(14, 0x0064_0000);
+        write_program(
+            &mut bus,
+            0x0000_0000,
+            &[
+                cop2_command(gte_op(0, 0, 0, 0, 0, 0x06)), // NCLIP, 8 cycles
+                cop(0x12, 0x00, 1, 24, 0),                 // mfc2 r1,MAC0
+                0,
+            ],
+        );
+
+        assert_eq!(cpu.step(&mut bus), 2);
+        assert_eq!(cpu.gte.busy_cycles(), 6);
+        assert_eq!(cpu.step(&mut bus), 8);
+        assert_eq!(cpu.gte.busy_cycles(), 0);
+        assert_eq!(cpu.regs[1], 0);
+        assert_eq!(cpu.step(&mut bus), 2);
+        assert_eq!(cpu.regs[1], 10_000);
+    }
+
+    #[test]
+    fn independent_cpu_work_overlaps_gte_execution() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(None);
+        cpu.set_pc(0x8000_0000);
+        write_program(
+            &mut bus,
+            0x0000_0000,
+            &[
+                cop2_command(gte_op(0, 0, 0, 0, 0, 0x06)), // NCLIP, 8 cycles
+                0,
+                cop(0x12, 0x02, 1, 31, 0), // cfc2 r1,FLAG
+            ],
+        );
+
+        assert_eq!(cpu.step(&mut bus), 2);
+        assert_eq!(cpu.gte.busy_cycles(), 6);
+        assert_eq!(cpu.step(&mut bus), 2);
+        assert_eq!(cpu.gte.busy_cycles(), 4);
+        assert_eq!(cpu.step(&mut bus), 6);
+        assert_eq!(cpu.gte.busy_cycles(), 0);
+    }
+
+    #[test]
+    fn swc2_stalls_before_storing_a_gte_result() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(None);
+        cpu.set_pc(0x8000_0000);
+        cpu.gte.write_data(12, 0x0000_0000);
+        cpu.gte.write_data(13, 0x0000_0064);
+        cpu.gte.write_data(14, 0x0064_0000);
+        write_program(
+            &mut bus,
+            0x0000_0000,
+            &[
+                cop2_command(gte_op(0, 0, 0, 0, 0, 0x06)), // NCLIP, 8 cycles
+                i(0x3a, 0, 24, 0x0100),                    // swc2 MAC0,0x100(r0)
+            ],
+        );
+
+        assert_eq!(cpu.step(&mut bus), 2);
+        assert_eq!(cpu.step(&mut bus), 8);
+        assert_eq!(bus.read32(0x100), 10_000);
+    }
+
+    #[test]
+    fn gte_writes_overlap_but_commands_wait_for_previous_command() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(None);
+        cpu.set_pc(0x8000_0000);
+        cpu.regs[1] = 0x1234;
+        write_program(
+            &mut bus,
+            0x0000_0000,
+            &[
+                cop2_command(gte_op(0, 0, 0, 0, 0, 0x06)), // NCLIP, 8 cycles
+                cop(0x12, 0x04, 1, 0, 0),                  // mtc2 r1,VXY0
+                cop2_command(gte_op(0, 0, 0, 0, 0, 0x28)), // SQR, 5 cycles
+            ],
+        );
+
+        assert_eq!(cpu.step(&mut bus), 2);
+        assert_eq!(cpu.step(&mut bus), 2);
+        assert_eq!(cpu.gte.read_data(0), 0x1234);
+        assert_eq!(cpu.gte.busy_cycles(), 4);
+        assert_eq!(cpu.step(&mut bus), 6);
+        assert_eq!(cpu.gte.busy_cycles(), 3);
+    }
+
+    #[test]
+    fn cop2_condition_is_always_false() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(None);
+        cpu.set_pc(0x8000_0000);
+        write_program(
+            &mut bus,
+            0x0000_0000,
+            &[
+                bc2(false, 2),
+                i(0x09, 0, 1, 1),
+                i(0x09, 0, 1, 2),
+                i(0x09, 0, 2, 3),
+            ],
+        );
+
+        for _ in 0..3 {
+            cpu.step(&mut bus);
+        }
+        assert_eq!(cpu.regs[1], 1);
+        assert_eq!(cpu.regs[2], 3);
+
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(None);
+        cpu.set_pc(0x8000_0000);
+        write_program(
+            &mut bus,
+            0x0000_0000,
+            &[
+                bc2(true, 2),
+                i(0x09, 0, 1, 1),
+                i(0x09, 0, 1, 2),
+                i(0x09, 0, 2, 3),
+            ],
+        );
+
+        for _ in 0..3 {
+            cpu.step(&mut bus);
+        }
+        assert_eq!(cpu.regs[1], 2);
+        assert_eq!(cpu.regs[2], 0);
     }
 
     #[test]

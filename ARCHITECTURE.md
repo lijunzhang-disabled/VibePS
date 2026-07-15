@@ -69,11 +69,13 @@ The first CPU target is a MIPS R3000A-style interpreter:
 - Branch delay via `pc`/`next_pc`
 - One-instruction load delay
 - COP0 status/cause/EPC/basic exception handling
-- COP2/GTE register transfers plus documented-command baseline execution
+- COP2/GTE register transfers, documented commands, UNR projection division,
+  and command busy interlocks
 
-The implementation starts with a simple fixed cycle cost per instruction. Bus
-wait states, DMA contention, cache behavior, and GTE pipeline timings belong in
-later accuracy phases.
+The interpreter uses a simple fixed base cost per instruction. GTE commands
+track their documented latency, overlap independent CPU work, and stall
+dependent reads or later commands. Bus wait states, DMA contention, cache
+timing, and finer GTE register hazards belong in later accuracy phases.
 
 ## MMIO Ownership
 

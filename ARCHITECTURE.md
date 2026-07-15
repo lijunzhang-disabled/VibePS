@@ -36,6 +36,13 @@ Cross-device effects stay inside `Bus` where possible. For example, writing DMA
 channel control can immediately run the transfer because `Bus` owns RAM, DMA,
 GPU, SPU, CD-ROM, and interrupts.
 
+The SPU advances from `Bus::tick` at one stereo sample per 768 CPU cycles. It
+owns the 24 voice decoders, ADSR and volume generators, capture/reverb state,
+sound RAM, and a bounded interleaved output queue. DMA4 and CPU MMIO use the
+same internal transfer address, and sound-RAM accesses feed the SPU IRQ9
+detector. `Ps1::drain_audio` is the frontend boundary; no host audio dependency
+is present in the core crate.
+
 ## Memory Map
 
 The CPU virtual segments mirror physical memory:
@@ -120,3 +127,4 @@ The hardware details in this plan are based mainly on PSX-SPX:
 - Interrupt controller: https://psx-spx.consoledev.net/interrupts/
 - Controllers and memory cards: https://psx-spx.consoledev.net/controllersandmemorycards/
 - Serial interfaces: https://psx-spx.consoledev.net/serialinterfacessio/
+- Sound processing unit: https://psx-spx.consoledev.net/soundprocessingunitspu/

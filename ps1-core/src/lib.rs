@@ -83,6 +83,11 @@ impl Ps1 {
         self.run_cycles(APPROX_CYCLES_PER_FRAME);
     }
 
+    /// Drain interleaved stereo 44.1 kHz samples produced by the SPU.
+    pub fn drain_audio(&mut self, out: &mut [i16]) -> usize {
+        self.bus.spu.drain_audio(out)
+    }
+
     pub fn load_psx_exe(&mut self, exe: &[u8]) -> Result<(), ExeLoadError> {
         if exe.len() < 0x800 || &exe[0..8] != b"PS-X EXE" {
             return Err(ExeLoadError::InvalidHeader);

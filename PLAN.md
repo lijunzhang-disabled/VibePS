@@ -12,7 +12,7 @@
 | Phase 5: CD-ROM | In progress | BIOS-facing commands, Setloc/ReadN sector reads, cooked ISO/raw BIN/CUE data, DMA3 |
 | Phase 6: GTE | Done | COP2 registers/commands, UNR projection divider, command interlocks |
 | Phase 7: Controllers + memory cards | Done | SIO0/JOY, digital/analog polling, card protocol and raw images |
-| Phase 8: SPU | Pending | 24 ADPCM voices, ADSR, pitch, reverb, CD audio mixing |
+| Phase 8: SPU | Done | DMA4/RAM, 24 ADPCM voices, ADSR, pitch/noise, reverb, stereo mixing |
 | Phase 9: MDEC + compatibility | Pending | FMV decode path, game-focused bug fixing, save states |
 
 ## Hardware Targets
@@ -112,6 +112,27 @@ hazards are tracked as compatibility work rather than blocking later devices.
    `--memory-card2` options. DualShock configuration/rumble commands, multitap,
    and sub-byte signal timing remain optional compatibility work.
 
+## Phase 8 Details: SPU
+
+1. Implement SPU RAM and control registers. Done for the 512 KiB sound RAM,
+   voice/global/reverb register ranges, transfer address and FIFO, transfer
+   modes/status, 16/32-bit MMIO, DMA4 reads/writes, and IRQ9 status/edges.
+2. Implement the voice engine. Done for 24 voices, SPU-ADPCM blocks and filter
+   history, programmable pitch, PMON, loop start/end/repeat flags, `ENDX`, key
+   on/off, ADSR phases, per-channel volume, and shared noise generation.
+3. Implement the mixer. Done at the native 44.1 kHz rate with stereo main and
+   voice volumes, CD input volume and bypass behavior, voice 1/3 and CD capture
+   buffers, reverb sends, and the 22.05 kHz sound-RAM reverb path.
+4. Expose output. Done through a bounded interleaved `i16` queue,
+   `Ps1::drain_audio`, frontend queue reporting, and `--audio-dump PATH` WAV
+   streaming.
+
+The Phase 8 baseline is complete. Exact four-point Gaussian interpolation,
+sub-sample register timing, inactive-voice RAM reads, transfer FIFO latency,
+external audio, and hardware-order reverb edge cases remain compatibility work.
+The SPU accepts CD PCM, while XA/CD-DA production remains with the unfinished
+Phase 5 disc-audio path.
+
 ## Phase 5+ Compatibility
 
 The PS1 has several accuracy traps that should be handled incrementally:
@@ -122,5 +143,5 @@ The PS1 has several accuracy traps that should be handled incrementally:
 - Exact GPU-derived dotclock/HBlank timing and DMA CPU stall windows
 - GPU has no depth buffer; ordering table behavior matters
 - CD-ROM response/data queues and command latency
-- SPU transfer timing and delayed/unstable reads
+- SPU transfer timing, Gaussian interpolation, and delayed/unstable reads
 - GTE saturation flags and pipeline timings

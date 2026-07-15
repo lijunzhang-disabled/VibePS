@@ -21,6 +21,7 @@ struct Args {
     memory_cards: [Option<PathBuf>; 2],
     exe: Option<PathBuf>,
     trace: Option<PathBuf>,
+    audio_dump: Option<PathBuf>,
     steps: u64,
     test_mode: bool,
     test_mailbox: Option<(u32, u32)>,
@@ -67,6 +68,9 @@ pub fn run() -> Result<(), String> {
         let config = build_test_config(&args, steps);
         let report = ps1.run_loaded_psx_exe_test(&config);
         print_test_report(&report);
+        if let Some(path) = args.audio_dump.as_ref() {
+            write_queued_audio_dump(&mut ps1, path)?;
+        }
         save_memory_cards(&ps1, &args.memory_cards)?;
         if report.status.is_success() {
             return Ok(());
@@ -81,14 +85,27 @@ pub fn run() -> Result<(), String> {
         None => None,
     };
     let mut cycles = 0u64;
+    let mut wav = args
+        .audio_dump
+        .as_deref()
+        .map(audio::WavWriter::create)
+        .transpose()?;
+    let mut audio_buffer = [0i16; 4096];
     for step in 0..steps {
         if let Some(trace) = trace.as_mut() {
             write_trace_line(trace, step, &ps1)?;
         }
         cycles += ps1.step_one() as u64;
+        if let Some(wav) = wav.as_mut() {
+            drain_audio_chunk(&mut ps1, wav, &mut audio_buffer, false)?;
+        }
     }
     if let Some(trace) = trace.as_mut() {
         trace.flush().map_err(trace_write_error)?;
+    }
+    if let Some(mut wav) = wav {
+        drain_audio_chunk(&mut ps1, &mut wav, &mut audio_buffer, true)?;
+        wav.finish()?;
     }
     save_memory_cards(&ps1, &args.memory_cards)?;
 
@@ -102,7 +119,7 @@ pub fn run() -> Result<(), String> {
         istat = ps1.bus.irq.status(),
         imask = ps1.bus.irq.mask(),
         video = video::display_summary(&ps1),
-        audio = audio::audio_summary(),
+        audio = audio::audio_summary(&ps1),
     );
 
     Ok(())
@@ -143,6 +160,11 @@ fn parse_args() -> Result<Args, String> {
             }
             "--trace" => {
                 args.trace = Some(PathBuf::from(iter.next().ok_or("--trace requires a path")?));
+            }
+            "--audio-dump" => {
+                args.audio_dump = Some(PathBuf::from(
+                    iter.next().ok_or("--audio-dump requires a path")?,
+                ));
             }
             "--test" => {
                 args.test_mode = true;
@@ -332,6 +354,31 @@ fn save_memory_cards(ps1: &Ps1, paths: &[Option<PathBuf>; 2]) -> Result<(), Stri
             .map_err(|err| format!("failed to save memory card {}: {err}", path.display()))?;
     }
     Ok(())
+}
+
+fn drain_audio_chunk(
+    ps1: &mut Ps1,
+    wav: &mut audio::WavWriter,
+    buffer: &mut [i16],
+    drain_all: bool,
+) -> Result<(), String> {
+    while ps1.bus.spu.queued_samples() >= buffer.len()
+        || (drain_all && ps1.bus.spu.queued_samples() != 0)
+    {
+        let count = ps1.drain_audio(buffer);
+        wav.append(&buffer[..count])?;
+        if !drain_all {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn write_queued_audio_dump(ps1: &mut Ps1, path: &Path) -> Result<(), String> {
+    let mut wav = audio::WavWriter::create(path)?;
+    let mut buffer = [0i16; 4096];
+    drain_audio_chunk(ps1, &mut wav, &mut buffer, true)?;
+    wav.finish()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -586,7 +633,7 @@ fn trace_write_error(err: std::io::Error) -> String {
 
 fn usage_and_exit() -> ! {
     eprintln!(
-        "usage: ps1-frontend [--bios PATH] [--disc PATH] [--disc-sector-size 2048|2352] [--memory-card PATH] [--memory-card2 PATH] [--exe PATH] [--steps N] [--trace PATH] [--test] [--test-mailbox ADDR=PASS] [--test-stop-pc ADDR] [--test-pass-reg REG=VALUE] [--test-exit-reg REG]"
+        "usage: ps1-frontend [--bios PATH] [--disc PATH] [--disc-sector-size 2048|2352] [--memory-card PATH] [--memory-card2 PATH] [--exe PATH] [--steps N] [--trace PATH] [--audio-dump PATH] [--test] [--test-mailbox ADDR=PASS] [--test-stop-pc ADDR] [--test-pass-reg REG=VALUE] [--test-exit-reg REG]"
     );
     std::process::exit(2);
 }

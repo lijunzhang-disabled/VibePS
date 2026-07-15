@@ -2,7 +2,7 @@ use crate::audio::Spu;
 use crate::cdrom::Cdrom;
 use crate::dma::DmaController;
 use crate::gpu::Gpu;
-use crate::interrupt::{InterruptController, IRQ_CDROM, IRQ_DMA, IRQ_JOY};
+use crate::interrupt::{InterruptController, IRQ_CDROM, IRQ_DMA, IRQ_JOY, IRQ_SPU};
 use crate::joy::JoySerial;
 use crate::mdec::Mdec;
 use crate::timer::Timers;
@@ -238,6 +238,9 @@ impl Bus {
         if self.joy.tick(cycles) {
             self.irq.request(IRQ_JOY);
         }
+        if self.spu.tick(cycles) {
+            self.irq.request(IRQ_SPU);
+        }
     }
 
     pub fn cache_control(&self) -> u32 {
@@ -371,6 +374,10 @@ impl Bus {
         if (0x1f80_1800..=0x1f80_1803).contains(&phys) {
             return self.cdrom.read8(phys - 0x1f80_1800);
         }
+        if (0x1f80_1c00..=0x1f80_1fff).contains(&phys) {
+            let value = self.spu.read16((phys & !1) - 0x1f80_1c00);
+            return (value >> ((phys & 1) * 8)) as u8;
+        }
         let word = self.read_io32(phys & !3);
         ((word >> ((phys & 3) * 8)) & 0xff) as u8
     }
@@ -411,6 +418,11 @@ impl Bus {
             0x1f80_1814 => self.gpu.read_gp1(),
             0x1f80_1820 => self.mdec.read_data(),
             0x1f80_1824 => self.mdec.read_status(),
+            0x1f80_1c00..=0x1f80_1ffc => {
+                let lo = self.spu.read16(phys - 0x1f80_1c00) as u32;
+                let hi = self.spu.read16((phys + 2) - 0x1f80_1c00) as u32;
+                lo | (hi << 16)
+            }
             _ => {
                 let offset = (phys as usize - 0x1f80_1000) & 0x1fff;
                 u32::from_le_bytes([
@@ -437,6 +449,12 @@ impl Bus {
         }
         if (0x1f80_1800..=0x1f80_1803).contains(&phys) {
             self.cdrom.write8(phys - 0x1f80_1800, value);
+            return;
+        }
+        if (0x1f80_1c00..=0x1f80_1fff).contains(&phys) {
+            if (phys & 1) == 0 {
+                self.spu.write16(phys - 0x1f80_1c00, value as u16);
+            }
             return;
         }
         let offset = (phys as usize - 0x1f80_1000) & 0x1fff;
@@ -483,6 +501,11 @@ impl Bus {
             0x1f80_1814 => self.gpu.write_gp1(value),
             0x1f80_1820 => self.mdec.write_data(value),
             0x1f80_1824 => self.mdec.write_control(value),
+            0x1f80_1c00..=0x1f80_1ffc => {
+                self.spu.write16(phys - 0x1f80_1c00, value as u16);
+                self.spu
+                    .write16((phys + 2) - 0x1f80_1c00, (value >> 16) as u16);
+            }
             _ => {
                 let offset = (phys as usize - 0x1f80_1000) & 0x1fff;
                 let bytes = value.to_le_bytes();
@@ -737,8 +760,9 @@ fn icache_line_index(addr: u32) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{Bus, BCC_IS1, BCC_TAG, DEFAULT_CACHE_CONTROL};
+    use crate::audio::spu::SPU_CYCLES_PER_SAMPLE;
     use crate::cdrom::CdromSectorSize;
-    use crate::interrupt::{IRQ_DMA, IRQ_JOY};
+    use crate::interrupt::{IRQ_DMA, IRQ_JOY, IRQ_SPU};
 
     #[test]
     fn maps_ram_through_kseg0_and_kseg1() {
@@ -782,6 +806,46 @@ mod tests {
         assert_ne!(bus.read32(0x1f80_1044) & (1 << 9), 0);
         assert_eq!(bus.read16(0x1f80_1048), 0x000d);
         assert_eq!(bus.read16(0x1f80_104e), 1);
+    }
+
+    #[test]
+    fn spu_mmio_dma4_and_irq9_share_the_sound_ram_transfer_address() {
+        let mut bus = Bus::new(None);
+        bus.write32(0x0000_0100, 0x4433_2211);
+        bus.write16(0x1f80_1da4, 0x20);
+        bus.write16(0x1f80_1da6, 0x20);
+        bus.write16(0x1f80_1daa, 0x8060);
+        bus.write32(0x1f80_10f0, 1 << 19);
+        bus.write32(0x1f80_10c0, 0x0000_0100);
+        bus.write32(0x1f80_10c4, (1 << 16) | 1);
+
+        bus.write32(0x1f80_10c8, 0x0100_0201);
+        bus.tick(1);
+
+        assert_eq!(&bus.spu.ram()[0x100..0x104], &[0x11, 0x22, 0x33, 0x44]);
+        assert_eq!(bus.read16(0x1f80_1da6), 0x20);
+        assert_ne!(bus.read16(0x1f80_1dae) & (1 << 6), 0);
+        assert_ne!(bus.irq.status() & IRQ_SPU, 0);
+        assert_eq!(bus.read32(0x1f80_10c8) & (1 << 24), 0);
+
+        bus.write16(0x1f80_1daa, 0x8030);
+        bus.write16(0x1f80_1da6, 0x20);
+        bus.write32(0x1f80_10c0, 0x0000_0200);
+        bus.write32(0x1f80_10c4, (1 << 16) | 1);
+        bus.write32(0x1f80_10c8, 0x0100_0200);
+        assert_eq!(bus.read32(0x0000_0200), 0x4433_2211);
+
+        bus.write32(0x1f80_1c00, 0x2222_1111);
+        assert_eq!(bus.read32(0x1f80_1c00), 0x2222_1111);
+    }
+
+    #[test]
+    fn bus_tick_clocks_spu_output_at_44100_hz() {
+        let mut bus = Bus::new(None);
+
+        bus.tick(SPU_CYCLES_PER_SAMPLE * 2);
+
+        assert_eq!(bus.spu.queued_samples(), 4);
     }
 
     #[test]

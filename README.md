@@ -12,7 +12,7 @@ This repository currently contains the first implementation slice:
 - BIU/cache-control register, isolated-cache data access behavior, cached
   KUSEG/KSEG0 instruction fetches, and uncached KSEG1 fetches
 - Interrupt controller, root-counter timer modes, DMA channel modes/IRQs,
-  GPU linked-list DMA, OTC, and GPU/SPU/CD scaffolding
+  GPU linked-list DMA, OTC, and central device MMIO integration
 - GPU GP0/GP1 command parsing, VRAM upload/readback/copy, flat and textured
   primitive rendering, display register state, and BGR555 frame extraction
 - CD-ROM command/status basics with cooked ISO/raw BIN/single-track CUE sector
@@ -22,8 +22,10 @@ This repository currently contains the first implementation slice:
   command interlocks
 - SIO0/JOY controller polling for digital and analog pads, delayed IRQ7, and
   persistent raw memory-card images with sector read/write protocols
+- SPU register/RAM model with DMA4, IRQ9, 24 SPU-ADPCM voices, ADSR, pitch and
+  noise modes, capture buffers, reverb routing, and 44.1 kHz stereo output
 - Minimal PS-X EXE loader and CLI runner with BIOS boot trace output
-- Focused unit tests for CPU and memory behavior
+- Focused unit tests for CPU, memory, graphics, I/O, and audio behavior
 
 It is not yet a playable emulator. Phase 1 CPU/bus, Phase 2 BIOS boot bring-up,
 Phase 3 DMA/timer/IRQ behavior, and the Phase 4 core GPU path are complete
@@ -31,9 +33,9 @@ enough to move on. Phase 5 CD-ROM now has BIOS-facing command coverage and
 single data-track image mounting in place. Phase 6 GTE now has a documented
 command baseline, the hardware projection divider, and command busy timing;
 saturation corner cases and per-register pipeline hazards remain accuracy work.
-Phase 7 controller and memory-card baselines are complete. The next milestones
-are SPU, GPU timing accuracy, full CD-ROM image/timing compatibility, and an SDL
-frontend.
+Phase 7 controller and memory-card baselines and the Phase 8 SPU baseline are
+complete. The next milestones are MDEC, GPU timing accuracy, full CD-ROM
+image/timing/audio compatibility, save states, and an SDL frontend.
 
 ## Run
 
@@ -45,6 +47,7 @@ cargo run -p ps1-frontend -- --bios path/to/SCPH1001.BIN --steps 100000 --trace 
 cargo run -p ps1-frontend -- --bios path/to/SCPH1001.BIN --exe path/to/demo.exe --steps 100000
 cargo run -p ps1-frontend -- --bios path/to/SCPH1001.BIN --disc path/to/game.iso --steps 100000
 cargo run -p ps1-frontend -- --bios path/to/SCPH1001.BIN --memory-card saves/card1.mcd --steps 100000
+cargo run -p ps1-frontend -- --bios path/to/SCPH1001.BIN --steps 1000000 --audio-dump debug/spu.wav
 cargo run -p ps1-frontend -- --exe path/to/test.ps-exe --test-mailbox 0x80010100=1 --steps 100000
 ```
 
@@ -68,6 +71,10 @@ track mode, and can be forced with `--disc-sector-size 2048|2352`.
 `--memory-card PATH` and `--memory-card2 PATH` mount raw 128 KiB card images in
 slots 1 and 2. A missing path starts as a formatted card and is created when the
 run ends; existing raw images are updated with writes made by emulated software.
+
+`--audio-dump PATH` streams the SPU's native 44.1 kHz stereo signed-16 output to
+a WAV file. The core API exposes the same interleaved samples through
+`Ps1::drain_audio` for a later realtime frontend.
 
 ## Project Docs
 
@@ -97,6 +104,7 @@ BIOS mirror at `0xBFC00000`.
 - PSX-SPX CPU specifications: https://psx-spx.consoledev.net/cpuspecifications/
 - PSX-SPX GPU: https://psx-spx.consoledev.net/graphicsprocessingunitgpu/
 - PSX-SPX GTE: https://psx-spx.consoledev.net/geometrytransformationenginegte/
+- PSX-SPX SPU: https://psx-spx.consoledev.net/soundprocessingunitspu/
 - PSX-SPX controllers and memory cards: https://psx-spx.consoledev.net/controllersandmemorycards/
 - PSX-SPX serial interfaces: https://psx-spx.consoledev.net/serialinterfacessio/
 - PSX-SPX DMA: https://psx-spx.consoledev.net/dmachannels/

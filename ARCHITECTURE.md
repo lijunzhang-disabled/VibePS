@@ -87,6 +87,8 @@ timing, and finer GTE register hazards belong in later accuracy phases.
 - `Gpu` for `GP0`, `GP1`, `GPUREAD`, and `GPUSTAT`
 - `Spu` for voice/control registers and 512 KB sound RAM
 - `Cdrom` for command/response/data register scaffolding
+- `JoySerial` for SIO0 registers, controller/card selection, serial timing, and
+  IRQ7
 - `Mdec` for command/status scaffolding
 
 This is intentionally similar to the GBA bus design: MMIO writes decode at one
@@ -116,3 +118,5 @@ The hardware details in this plan are based mainly on PSX-SPX:
 - DMA channels: https://psx-spx.consoledev.net/dmachannels/
 - Root counters: https://psx-spx.consoledev.net/timers/
 - Interrupt controller: https://psx-spx.consoledev.net/interrupts/
+- Controllers and memory cards: https://psx-spx.consoledev.net/controllersandmemorycards/
+- Serial interfaces: https://psx-spx.consoledev.net/serialinterfacessio/

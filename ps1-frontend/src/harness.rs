@@ -1,6 +1,7 @@
 use crate::{audio, video};
 use ps1_core::{
     cdrom::CdromSectorSize,
+    joy::MemoryCard,
     test_runner::{
         PsxExeExitCodeSource, PsxExePassCondition, PsxExeRunReport, PsxExeStopCondition,
         PsxExeTestConfig,
@@ -9,7 +10,7 @@ use ps1_core::{
 };
 use std::env;
 use std::fs::{self, File};
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Default)]
@@ -17,6 +18,7 @@ struct Args {
     bios: Option<PathBuf>,
     disc: Option<PathBuf>,
     disc_sector_size: Option<CdromSectorSize>,
+    memory_cards: [Option<PathBuf>; 2],
     exe: Option<PathBuf>,
     trace: Option<PathBuf>,
     steps: u64,
@@ -38,6 +40,7 @@ pub fn run() -> Result<(), String> {
     });
 
     let mut ps1 = Ps1::new(bios);
+    mount_memory_cards(&mut ps1, &args.memory_cards)?;
     if let Some(path) = args.disc.as_ref() {
         let (disc, sector_size) = load_disc_image(path, args.disc_sector_size)?;
         ps1.bus
@@ -64,14 +67,15 @@ pub fn run() -> Result<(), String> {
         let config = build_test_config(&args, steps);
         let report = ps1.run_loaded_psx_exe_test(&config);
         print_test_report(&report);
+        save_memory_cards(&ps1, &args.memory_cards)?;
         if report.status.is_success() {
             return Ok(());
         }
         return Err(format!("PS-EXE test did not pass: {:?}", report.status));
     }
 
-    let mut trace = match args.trace {
-        Some(path) => Some(BufWriter::new(File::create(&path).map_err(|err| {
+    let mut trace = match args.trace.as_ref() {
+        Some(path) => Some(BufWriter::new(File::create(path).map_err(|err| {
             format!("failed to create trace {}: {err}", path.display())
         })?)),
         None => None,
@@ -86,6 +90,7 @@ pub fn run() -> Result<(), String> {
     if let Some(trace) = trace.as_mut() {
         trace.flush().map_err(trace_write_error)?;
     }
+    save_memory_cards(&ps1, &args.memory_cards)?;
 
     println!(
         "steps={steps} cycles={cycles} pc=0x{pc:08x} next_pc=0x{next:08x} r2=0x{r2:08x} r29=0x{sp:08x} r31=0x{ra:08x} istat=0x{istat:04x} imask=0x{imask:04x} {video} {audio}",
@@ -122,6 +127,16 @@ fn parse_args() -> Result<Args, String> {
                     .next()
                     .ok_or("--disc-sector-size requires 2048 or 2352")?;
                 args.disc_sector_size = Some(parse_disc_sector_size(&value)?);
+            }
+            "--memory-card" => {
+                args.memory_cards[0] = Some(PathBuf::from(
+                    iter.next().ok_or("--memory-card requires a path")?,
+                ));
+            }
+            "--memory-card2" => {
+                args.memory_cards[1] = Some(PathBuf::from(
+                    iter.next().ok_or("--memory-card2 requires a path")?,
+                ));
             }
             "--exe" => {
                 args.exe = Some(PathBuf::from(iter.next().ok_or("--exe requires a path")?));
@@ -285,6 +300,38 @@ fn load_disc_image(
     let sector_size =
         forced_sector_size.unwrap_or_else(|| detect_disc_sector_size(path, image.len()));
     Ok((image, sector_size))
+}
+
+fn mount_memory_cards(ps1: &mut Ps1, paths: &[Option<PathBuf>; 2]) -> Result<(), String> {
+    for (port, path) in paths.iter().enumerate() {
+        let Some(path) = path else {
+            continue;
+        };
+        let card = match fs::read(path) {
+            Ok(image) => MemoryCard::from_bytes(image)
+                .map_err(|err| format!("failed to load memory card {}: {err:?}", path.display()))?,
+            Err(err) if err.kind() == ErrorKind::NotFound => MemoryCard::formatted(),
+            Err(err) => {
+                return Err(format!(
+                    "failed to read memory card {}: {err}",
+                    path.display()
+                ));
+            }
+        };
+        ps1.bus.joy.insert_memory_card(port, card);
+    }
+    Ok(())
+}
+
+fn save_memory_cards(ps1: &Ps1, paths: &[Option<PathBuf>; 2]) -> Result<(), String> {
+    for (port, path) in paths.iter().enumerate() {
+        let (Some(path), Some(card)) = (path, ps1.bus.joy.memory_card(port)) else {
+            continue;
+        };
+        fs::write(path, card.image())
+            .map_err(|err| format!("failed to save memory card {}: {err}", path.display()))?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -539,7 +586,7 @@ fn trace_write_error(err: std::io::Error) -> String {
 
 fn usage_and_exit() -> ! {
     eprintln!(
-        "usage: ps1-frontend [--bios PATH] [--disc PATH] [--disc-sector-size 2048|2352] [--exe PATH] [--steps N] [--trace PATH] [--test] [--test-mailbox ADDR=PASS] [--test-stop-pc ADDR] [--test-pass-reg REG=VALUE] [--test-exit-reg REG]"
+        "usage: ps1-frontend [--bios PATH] [--disc PATH] [--disc-sector-size 2048|2352] [--memory-card PATH] [--memory-card2 PATH] [--exe PATH] [--steps N] [--trace PATH] [--test] [--test-mailbox ADDR=PASS] [--test-stop-pc ADDR] [--test-pass-reg REG=VALUE] [--test-exit-reg REG]"
     );
     std::process::exit(2);
 }
@@ -547,10 +594,12 @@ fn usage_and_exit() -> ! {
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_disc_sector_size, load_disc_image, parse_addr_value, parse_cue_disc_spec,
-        parse_cue_msf, parse_disc_sector_size, parse_reg, parse_reg_value, parse_u32,
+        detect_disc_sector_size, load_disc_image, mount_memory_cards, parse_addr_value,
+        parse_cue_disc_spec, parse_cue_msf, parse_disc_sector_size, parse_reg, parse_reg_value,
+        parse_u32, save_memory_cards,
     };
     use ps1_core::cdrom::CdromSectorSize;
+    use ps1_core::{joy::MEMORY_CARD_SIZE, Ps1};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -734,6 +783,22 @@ mod tests {
         assert_eq!(parse_cue_msf("00:00:00").unwrap(), 0);
         assert_eq!(parse_cue_msf("01:02:03").unwrap(), 4653);
         assert!(parse_cue_msf("00:00:75").is_err());
+    }
+
+    #[test]
+    fn creates_and_persists_raw_memory_card_image() {
+        let dir = TempDir::new("ps1-memory-card");
+        let path = dir.path().join("card1.mcd");
+        let paths = [Some(path.clone()), None];
+        let mut ps1 = Ps1::new(None);
+
+        mount_memory_cards(&mut ps1, &paths).unwrap();
+        assert_eq!(&ps1.bus.joy.memory_card(0).unwrap().image()[..2], b"MC");
+        save_memory_cards(&ps1, &paths).unwrap();
+
+        let image = fs::read(path).unwrap();
+        assert_eq!(image.len(), MEMORY_CARD_SIZE);
+        assert_eq!(&image[..2], b"MC");
     }
 
     struct TempDir {

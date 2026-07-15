@@ -2,7 +2,8 @@ use crate::audio::Spu;
 use crate::cdrom::Cdrom;
 use crate::dma::DmaController;
 use crate::gpu::Gpu;
-use crate::interrupt::{InterruptController, IRQ_CDROM, IRQ_DMA};
+use crate::interrupt::{InterruptController, IRQ_CDROM, IRQ_DMA, IRQ_JOY};
+use crate::joy::JoySerial;
 use crate::mdec::Mdec;
 use crate::timer::Timers;
 use crate::{BIOS_SIZE, MAIN_RAM_SIZE, SCRATCHPAD_SIZE};
@@ -41,6 +42,7 @@ pub struct Bus {
     pub gpu: Gpu,
     pub spu: Spu,
     pub cdrom: Cdrom,
+    pub joy: JoySerial,
     pub mdec: Mdec,
     open_bus: u32,
 }
@@ -67,6 +69,7 @@ impl Bus {
             gpu: Gpu::new(),
             spu: Spu::new(),
             cdrom: Cdrom::new(),
+            joy: JoySerial::new(),
             mdec: Mdec::new(),
             open_bus: 0,
         }
@@ -232,6 +235,9 @@ impl Bus {
         if self.cdrom.interrupt_pending() {
             self.irq.request(IRQ_CDROM);
         }
+        if self.joy.tick(cycles) {
+            self.irq.request(IRQ_JOY);
+        }
     }
 
     pub fn cache_control(&self) -> u32 {
@@ -354,6 +360,14 @@ impl Bus {
     }
 
     fn read_io8(&mut self, phys: u32) -> u8 {
+        if phys == 0x1f80_1040 {
+            return self.joy.read_data8();
+        }
+        if matches!(phys, 0x1f80_1048..=0x1f80_104b | 0x1f80_104e..=0x1f80_104f) {
+            let halfword_addr = phys & !1;
+            let value = self.read_io16(halfword_addr);
+            return (value >> ((phys & 1) * 8)) as u8;
+        }
         if (0x1f80_1800..=0x1f80_1803).contains(&phys) {
             return self.cdrom.read8(phys - 0x1f80_1800);
         }
@@ -363,6 +377,10 @@ impl Bus {
 
     fn read_io16(&mut self, phys: u32) -> u16 {
         match phys {
+            0x1f80_1040 => self.joy.read_data16(),
+            0x1f80_1048 => self.joy.mode(),
+            0x1f80_104a => self.joy.control(),
+            0x1f80_104e => self.joy.baud(),
             0x1f80_1070 => self.irq.status(),
             0x1f80_1074 => self.irq.mask(),
             0x1f80_1100..=0x1f80_112f => self.timers.read16(phys - 0x1f80_1100),
@@ -377,6 +395,10 @@ impl Bus {
 
     fn read_io32(&mut self, phys: u32) -> u32 {
         match phys {
+            0x1f80_1040 => self.joy.read_data32(),
+            0x1f80_1044 => self.joy.status(),
+            0x1f80_1048 => self.joy.mode() as u32 | ((self.joy.control() as u32) << 16),
+            0x1f80_104c => (self.joy.baud() as u32) << 16,
             0x1f80_1070 => self.irq.status() as u32,
             0x1f80_1074 => self.irq.mask() as u32,
             0x1f80_1080..=0x1f80_10ff => self.dma.read32(phys - 0x1f80_1080),
@@ -402,6 +424,17 @@ impl Bus {
     }
 
     fn write_io8(&mut self, phys: u32, value: u8) {
+        if phys == 0x1f80_1040 {
+            self.joy.write_data8(value);
+            return;
+        }
+        if matches!(phys, 0x1f80_1048..=0x1f80_104b | 0x1f80_104e..=0x1f80_104f) {
+            let old = self.read_io16(phys & !1);
+            let shift = (phys & 1) * 8;
+            let merged = (old & !(0xff << shift)) | ((value as u16) << shift);
+            self.write_io16(phys & !1, merged);
+            return;
+        }
         if (0x1f80_1800..=0x1f80_1803).contains(&phys) {
             self.cdrom.write8(phys - 0x1f80_1800, value);
             return;
@@ -412,6 +445,10 @@ impl Bus {
 
     fn write_io16(&mut self, phys: u32, value: u16) {
         match phys {
+            0x1f80_1040 => self.joy.write_data8(value as u8),
+            0x1f80_1048 => self.joy.write_mode(value),
+            0x1f80_104a => self.joy.write_control(value),
+            0x1f80_104e => self.joy.write_baud(value),
             0x1f80_1070 => self.irq.acknowledge(value),
             0x1f80_1074 => self.irq.set_mask(value),
             0x1f80_1100..=0x1f80_112f => self.timers.write16(phys - 0x1f80_1100, value),
@@ -426,6 +463,12 @@ impl Bus {
 
     fn write_io32(&mut self, phys: u32, value: u32) {
         match phys {
+            0x1f80_1040 => self.joy.write_data8(value as u8),
+            0x1f80_1048 => {
+                self.joy.write_mode(value as u16);
+                self.joy.write_control((value >> 16) as u16);
+            }
+            0x1f80_104c => self.joy.write_baud((value >> 16) as u16),
             0x1f80_1070 => self.irq.acknowledge(value as u16),
             0x1f80_1074 => self.irq.set_mask(value as u16),
             0x1f80_1080..=0x1f80_10ff => {
@@ -695,7 +738,7 @@ fn icache_line_index(addr: u32) -> usize {
 mod tests {
     use super::{Bus, BCC_IS1, BCC_TAG, DEFAULT_CACHE_CONTROL};
     use crate::cdrom::CdromSectorSize;
-    use crate::interrupt::IRQ_DMA;
+    use crate::interrupt::{IRQ_DMA, IRQ_JOY};
 
     #[test]
     fn maps_ram_through_kseg0_and_kseg1() {
@@ -719,6 +762,26 @@ mod tests {
         bios[1] = 0x34;
         let mut bus = Bus::new(Some(bios));
         assert_eq!(bus.read16(0xbfc0_0000), 0x3412);
+    }
+
+    #[test]
+    fn joy_mmio_polls_controller_and_requests_delayed_irq() {
+        let mut bus = Bus::new(None);
+        bus.write16(0x1f80_1048, 0x000d);
+        bus.write16(0x1f80_104e, 1);
+        bus.write16(0x1f80_104a, 0x1003);
+
+        bus.write8(0x1f80_1040, 0x01);
+        assert_eq!(bus.read32(0x1f80_1044) & 5, 0);
+        bus.tick(8);
+        assert_eq!(bus.read8(0x1f80_1040), 0xff);
+        assert_eq!(bus.irq.status() & IRQ_JOY, 0);
+
+        bus.tick(400);
+        assert_ne!(bus.irq.status() & IRQ_JOY, 0);
+        assert_ne!(bus.read32(0x1f80_1044) & (1 << 9), 0);
+        assert_eq!(bus.read16(0x1f80_1048), 0x000d);
+        assert_eq!(bus.read16(0x1f80_104e), 1);
     }
 
     #[test]

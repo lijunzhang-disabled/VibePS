@@ -7,6 +7,7 @@ pub mod cpu;
 pub mod dma;
 pub mod gpu;
 pub mod interrupt;
+pub mod joy;
 pub mod mdec;
 pub mod scheduler;
 pub mod test_runner;

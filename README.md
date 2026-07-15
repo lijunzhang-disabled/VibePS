@@ -20,6 +20,8 @@ This repository currently contains the first implementation slice:
 - GTE register model with documented geometry, arithmetic, lighting, color,
   interpolation, and depth-cue commands, UNR projection division, and CPU
   command interlocks
+- SIO0/JOY controller polling for digital and analog pads, delayed IRQ7, and
+  persistent raw memory-card images with sector read/write protocols
 - Minimal PS-X EXE loader and CLI runner with BIOS boot trace output
 - Focused unit tests for CPU and memory behavior
 
@@ -29,9 +31,9 @@ enough to move on. Phase 5 CD-ROM now has BIOS-facing command coverage and
 single data-track image mounting in place. Phase 6 GTE now has a documented
 command baseline, the hardware projection divider, and command busy timing;
 saturation corner cases and per-register pipeline hazards remain accuracy work.
-The next milestones are SPU,
-controllers, memory cards, GPU timing accuracy, full CD-ROM image/timing
-compatibility, and an SDL frontend.
+Phase 7 controller and memory-card baselines are complete. The next milestones
+are SPU, GPU timing accuracy, full CD-ROM image/timing compatibility, and an SDL
+frontend.
 
 ## Run
 
@@ -42,6 +44,7 @@ cargo run -p ps1-frontend -- --bios path/to/SCPH1001.BIN --steps 100000
 cargo run -p ps1-frontend -- --bios path/to/SCPH1001.BIN --steps 100000 --trace debug/boot.trace
 cargo run -p ps1-frontend -- --bios path/to/SCPH1001.BIN --exe path/to/demo.exe --steps 100000
 cargo run -p ps1-frontend -- --bios path/to/SCPH1001.BIN --disc path/to/game.iso --steps 100000
+cargo run -p ps1-frontend -- --bios path/to/SCPH1001.BIN --memory-card saves/card1.mcd --steps 100000
 cargo run -p ps1-frontend -- --exe path/to/test.ps-exe --test-mailbox 0x80010100=1 --steps 100000
 ```
 
@@ -61,6 +64,10 @@ it equals the requested pass value.
 2352-byte/sector image, or single data-track `.cue` pointing at one of those
 images. The sector size is auto-detected from the extension/file length or CUE
 track mode, and can be forced with `--disc-sector-size 2048|2352`.
+
+`--memory-card PATH` and `--memory-card2 PATH` mount raw 128 KiB card images in
+slots 1 and 2. A missing path starts as a formatted card and is created when the
+run ends; existing raw images are updated with writes made by emulated software.
 
 ## Project Docs
 
@@ -90,6 +97,8 @@ BIOS mirror at `0xBFC00000`.
 - PSX-SPX CPU specifications: https://psx-spx.consoledev.net/cpuspecifications/
 - PSX-SPX GPU: https://psx-spx.consoledev.net/graphicsprocessingunitgpu/
 - PSX-SPX GTE: https://psx-spx.consoledev.net/geometrytransformationenginegte/
+- PSX-SPX controllers and memory cards: https://psx-spx.consoledev.net/controllersandmemorycards/
+- PSX-SPX serial interfaces: https://psx-spx.consoledev.net/serialinterfacessio/
 - PSX-SPX DMA: https://psx-spx.consoledev.net/dmachannels/
 - PSX-SPX timers: https://psx-spx.consoledev.net/timers/
 - PSX-SPX interrupts: https://psx-spx.consoledev.net/interrupts/

@@ -10,8 +10,8 @@
 | Phase 3: DMA + timers + IRQs | Done | DMA modes/channels, GPU linked lists, OTC, DICR/DPCR IRQs, root-counter modes |
 | Phase 4: GPU | Done | GP0/GP1 parser, VRAM transfers, polygons, rectangles, display output |
 | Phase 5: CD-ROM | In progress | BIOS-facing commands, Setloc/ReadN sector reads, cooked ISO/raw BIN/CUE data, DMA3 |
-| Phase 6: GTE | In progress | COP2 registers/commands, UNR projection divider, command interlocks |
-| Phase 7: Controllers + memory cards | Pending | JOY serial protocol, digital/analog pads, card EEPROM protocol |
+| Phase 6: GTE | Done | COP2 registers/commands, UNR projection divider, command interlocks |
+| Phase 7: Controllers + memory cards | Done | SIO0/JOY, digital/analog polling, card protocol and raw images |
 | Phase 8: SPU | Pending | 24 ADPCM voices, ADSR, pitch, reverb, CD audio mixing |
 | Phase 9: MDEC + compatibility | Pending | FMV decode path, game-focused bug fixing, save states |
 
@@ -88,11 +88,29 @@
    the baseline: `SQR`, `OP`, `GPF`, `GPL`, `DPCS`, `DPCT`, `DCPL`, `INTPL`,
    `NCS`, `NCT`, `NCCS`, `NCCT`, `NCDS`, `NCDT`, `CC`, and `CDP` execute
    through shared MAC/IR/color FIFO helpers.
-4. Add edge-case compatibility. In progress: `MVMVA` `mx=3` and `cv=2`, exact
-   UNR divider behavior, documented command latencies, dependent CPU stalls,
-   overlapping CPU work, and `BC2F`/`BC2T` behavior are covered. Remaining
-   saturation/overflow corner cases, per-register pipeline hazards, and
-   hardware/reference-emulator comparisons are pending.
+4. Add edge-case compatibility. Done for the baseline: `MVMVA` `mx=3` and
+   `cv=2`, exact UNR divider behavior, documented command latencies, dependent
+   CPU stalls, overlapping CPU work, and `BC2F`/`BC2T` behavior are covered.
+   Remaining saturation/overflow corner cases, per-register pipeline hazards,
+   and hardware/reference-emulator comparisons are pending.
+
+The Phase 6 baseline is complete. Remaining GTE precision and internal pipeline
+hazards are tracked as compatibility work rather than blocking later devices.
+
+## Phase 7 Details: Controllers + Memory Cards
+
+1. Implement SIO0/JOY registers. Done for `JOY_DATA`, `JOY_STAT`, `JOY_MODE`,
+   `JOY_CTRL`, and `JOY_BAUD`, including byte transfer timing, RX FIFO status,
+   two-port selection, delayed ACK pulses, and IRQ7.
+2. Implement standard controllers. Done for active-low digital polling and
+   DualShock analog-mode polling with four axis bytes. The core exposes button,
+   analog-axis, connection, and port-selection state.
+3. Implement memory cards. Done for formatted/raw 128 KiB images, card flags,
+   GetID, 128-byte sector reads/writes, XOR checksums, invalid-sector handling,
+   dirty state, and both slots.
+4. Persist card images. Done through frontend `--memory-card` and
+   `--memory-card2` options. DualShock configuration/rumble commands, multitap,
+   and sub-byte signal timing remain optional compatibility work.
 
 ## Phase 5+ Compatibility
 
